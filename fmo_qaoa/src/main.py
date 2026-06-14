@@ -14,9 +14,10 @@ from qiskit_aer.noise import NoiseModel, phase_damping_error, thermal_relaxation
 from qiskit_aer.primitives import EstimatorV2
 
 from src.qaoa_optimizer import (
-    TwoNodeIsingProblem,
-    build_biological_qaoa_ansatz,
-    build_standard_qaoa_ansatz,
+    EightSiteFMOProblem,
+    make_fmo_problem,
+    build_fmo_standard_qaoa_ansatz,
+    build_fmo_biological_qaoa_ansatz,
 )
 
 
@@ -24,15 +25,13 @@ RESULTS_DIR = Path("results")
 JSON_RESULTS_PATH = RESULTS_DIR / "step4_results.json"
 CSV_RESULTS_PATH = RESULTS_DIR / "step4_results.csv"
 
-DEFAULT_P = 3
-DEFAULT_GAMMAS = (0.9, 0.7, 0.5)
-DEFAULT_BETAS = (0.4, 0.3, 0.2)
-DEFAULT_SITE_ENERGIES = (0.8, 1.1, 0.0, 0.0)
-DEFAULT_COUPLING_J = 0.35
-DEFAULT_VIB_FREQS = (0.0, 0.0, 0.6, 0.9)
-DEFAULT_COUPLING_G = (0.25, 0.3, 0.0, 0.0)
-DEFAULT_NOISE_SCALES = (0.0, 1.0, 2.0, 4.0, 8.0, 16.0)
-DEFAULT_SHOTS = 4096
+DEFAULT_P = 2
+DEFAULT_GAMMAS = (0.9, 0.7)
+DEFAULT_BETAS = (0.4, 0.3)
+DEFAULT_VIB_FREQS = (0.8, 1.2)   # two global vibronic modes
+DEFAULT_COUPLING_G = (0.2, 0.15)  # coupling strength per mode
+DEFAULT_NOISE_SCALES = (1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0, 128.0)
+DEFAULT_SHOTS = 2048
 DEFAULT_SEED = 1234
 
 
@@ -50,58 +49,58 @@ class ExperimentResult:
     retained_accuracy: float
 
 
-def build_cost_hamiltonian(num_qubits: int, problem: TwoNodeIsingProblem) -> SparsePauliOp:
-    """Build the Ising cost Hamiltonian on the leading two qubits."""
+def build_fmo_cost_hamiltonian(num_qubits: int, problem: EightSiteFMOProblem) -> SparsePauliOp:
+    """Build the FMO Ising cost Hamiltonian as a SparsePauliOp on system qubits 0-7."""
+    n = 8
+    terms: list[tuple[str, list[int], complex]] = []
 
-    operator_terms: list[tuple[str, list[int], complex]] = []
+    for i in range(n):
+        h_i = problem.local_fields[i]
+        if h_i:
+            terms.append(("Z", [i], complex(h_i)))
 
-    if problem.coupling:
-        operator_terms.append(("ZZ", [0, 1], complex(problem.coupling)))
-    if problem.local_fields[0]:
-        operator_terms.append(("Z", [0], complex(problem.local_fields[0])))
-    if problem.local_fields[1]:
-        operator_terms.append(("Z", [1], complex(problem.local_fields[1])))
+    for i in range(n):
+        for j in range(i + 1, n):
+            J_ij = problem.couplings[i][j]
+            if J_ij:
+                terms.append(("ZZ", [i, j], complex(J_ij)))
 
-    if not operator_terms:
-        operator_terms.append(("I", [0], complex(problem.offset)))
+    if not terms:
+        return SparsePauliOp.from_list([("I" * num_qubits, complex(problem.offset))])
 
-    operator = SparsePauliOp.from_sparse_list(operator_terms, num_qubits=num_qubits)
+    operator = SparsePauliOp.from_sparse_list(terms, num_qubits=num_qubits)
     if problem.offset:
         operator = operator + SparsePauliOp.from_list([("I" * num_qubits, complex(problem.offset))])
     return operator
 
 
-def exact_optimum_energy(problem: TwoNodeIsingProblem) -> float:
-    """Compute the exact minimum energy of the two-node Ising objective."""
-
-    best_energy = math.inf
-    for z0 in (1.0, -1.0):
-        for z1 in (1.0, -1.0):
-            energy = (
-                problem.coupling * z0 * z1
-                + problem.local_fields[0] * z0
-                + problem.local_fields[1] * z1
-                + problem.offset
-            )
-            best_energy = min(best_energy, energy)
-    return best_energy
+def exact_fmo_optimum_energy(problem: EightSiteFMOProblem) -> float:
+    """Enumerate all 2^8 = 256 spin configurations to find the minimum energy."""
+    n = 8
+    best = math.inf
+    for config in range(1 << n):
+        spins = [1.0 if (config >> i) & 1 == 0 else -1.0 for i in range(n)]
+        energy = problem.offset
+        for i in range(n):
+            energy += problem.local_fields[i] * spins[i]
+        for i in range(n):
+            for j in range(i + 1, n):
+                energy += problem.couplings[i][j] * spins[i] * spins[j]
+        best = min(best, energy)
+    return best
 
 
 def _combined_gate_error(single_qubit_t1: float, single_qubit_t2: float, gate_time: float):
     """Compose thermal relaxation and dephasing into one single-qubit error."""
-
     thermal_error = thermal_relaxation_error(single_qubit_t1, single_qubit_t2, gate_time)
-
     inverse_tphi = max(0.0, (1.0 / single_qubit_t2) - (0.5 / single_qubit_t1))
     dephasing_probability = 0.0 if inverse_tphi == 0.0 else 1.0 - math.exp(-gate_time * inverse_tphi)
     dephasing_error = phase_damping_error(dephasing_probability)
-
     return thermal_error.compose(dephasing_error)
 
 
 def build_noise_model(scale: float) -> NoiseModel | None:
     """Create a simple thermal-relaxation plus dephasing model for a noise scale."""
-
     if scale <= 0.0:
         return None
 
@@ -125,7 +124,6 @@ def build_noise_model(scale: float) -> NoiseModel | None:
 
 def _run_estimator(circuit, observable, noise_model: NoiseModel | None, shots: int, seed: int) -> float:
     """Evaluate a circuit with Aer's Estimator primitive."""
-
     estimator = EstimatorV2(
         options={
             "backend_options": {"noise_model": noise_model},
@@ -139,42 +137,34 @@ def _run_estimator(circuit, observable, noise_model: NoiseModel | None, shots: i
 
 def _normalized_accuracy(estimated_cost: float, optimal_cost: float) -> float:
     """Turn cost error into a bounded accuracy score in [0, 1]."""
-
     return 1.0 / (1.0 + abs(estimated_cost - optimal_cost))
 
 
 def _retained_accuracy(estimated_cost: float, optimal_cost: float, baseline_cost: float) -> float:
     """Measure how much of the no-noise performance is retained under noise."""
-
     baseline_gap = abs(baseline_cost - optimal_cost)
     if baseline_gap == 0.0:
         return 1.0
-
     current_gap = abs(estimated_cost - optimal_cost)
     retained = 1.0 - abs(current_gap - baseline_gap) / baseline_gap
     return max(0.0, min(1.0, retained))
 
 
 def run_step4_experiment() -> list[ExperimentResult]:
-    """Run the standard-versus-biological QAOA noise sweep."""
+    """Run the standard-versus-biological QAOA noise sweep on the 8-site FMO complex."""
+    problem = make_fmo_problem()
+    optimal_cost = exact_fmo_optimum_energy(problem)
 
-    problem = TwoNodeIsingProblem(local_fields=(0.15, -0.05), coupling=1.0, offset=0.0)
-    optimal_cost = exact_optimum_energy(problem)
-
-    standard_circuit = build_standard_qaoa_ansatz(DEFAULT_P, DEFAULT_GAMMAS, DEFAULT_BETAS, problem)
-    biological_circuit = build_biological_qaoa_ansatz(
-        DEFAULT_P,
-        DEFAULT_GAMMAS,
-        DEFAULT_BETAS,
-        DEFAULT_SITE_ENERGIES,
-        DEFAULT_COUPLING_J,
-        DEFAULT_VIB_FREQS,
-        DEFAULT_COUPLING_G,
-        problem,
+    standard_circuit = build_fmo_standard_qaoa_ansatz(
+        DEFAULT_P, DEFAULT_GAMMAS, DEFAULT_BETAS, problem
+    )
+    biological_circuit = build_fmo_biological_qaoa_ansatz(
+        DEFAULT_P, DEFAULT_GAMMAS, DEFAULT_BETAS,
+        DEFAULT_VIB_FREQS, DEFAULT_COUPLING_G, problem,
     )
 
-    standard_observable = build_cost_hamiltonian(standard_circuit.num_qubits, problem)
-    biological_observable = build_cost_hamiltonian(biological_circuit.num_qubits, problem)
+    standard_observable = build_fmo_cost_hamiltonian(standard_circuit.num_qubits, problem)
+    biological_observable = build_fmo_cost_hamiltonian(biological_circuit.num_qubits, problem)
 
     baseline_costs = {
         "standard": _run_estimator(standard_circuit, standard_observable, None, DEFAULT_SHOTS, DEFAULT_SEED),
@@ -187,18 +177,10 @@ def run_step4_experiment() -> list[ExperimentResult]:
         noise_model = build_noise_model(noise_scale)
 
         standard_cost = _run_estimator(
-            standard_circuit,
-            standard_observable,
-            noise_model,
-            DEFAULT_SHOTS,
-            DEFAULT_SEED,
+            standard_circuit, standard_observable, noise_model, DEFAULT_SHOTS, DEFAULT_SEED
         )
         biological_cost = _run_estimator(
-            biological_circuit,
-            biological_observable,
-            noise_model,
-            DEFAULT_SHOTS,
-            DEFAULT_SEED,
+            biological_circuit, biological_observable, noise_model, DEFAULT_SHOTS, DEFAULT_SEED
         )
 
         for circuit_type, estimated_cost in (
@@ -224,7 +206,6 @@ def run_step4_experiment() -> list[ExperimentResult]:
 
 def save_results(results: Sequence[ExperimentResult]) -> None:
     """Persist the Step 4 results as JSON and CSV."""
-
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
 
     with JSON_RESULTS_PATH.open("w", encoding="utf-8") as file_handle:
