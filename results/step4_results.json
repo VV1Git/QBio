@@ -1,0 +1,122 @@
+[
+  {
+    "noise_scale": 0.0,
+    "circuit_type": "standard",
+    "estimated_cost": -0.2610008362698061,
+    "baseline_cost": -0.2610008362698061,
+    "optimal_cost": -1.2,
+    "cost_gap": 0.9389991637301939,
+    "normalized_accuracy": 0.5157299800357971,
+    "retained_accuracy": 1.0
+  },
+  {
+    "noise_scale": 0.0,
+    "circuit_type": "biological",
+    "estimated_cost": 0.5353873662313565,
+    "baseline_cost": 0.5353873662313565,
+    "optimal_cost": -1.2,
+    "cost_gap": 1.7353873662313566,
+    "normalized_accuracy": 0.365578934941758,
+    "retained_accuracy": 1.0
+  },
+  {
+    "noise_scale": 1.0,
+    "circuit_type": "standard",
+    "estimated_cost": -0.24183820695947147,
+    "baseline_cost": -0.2610008362698061,
+    "optimal_cost": -1.2,
+    "cost_gap": 0.9581617930405285,
+    "normalized_accuracy": 0.5106830311744842,
+    "retained_accuracy": 0.9795924958716569
+  },
+  {
+    "noise_scale": 1.0,
+    "circuit_type": "biological",
+    "estimated_cost": 0.515376451109131,
+    "baseline_cost": 0.5353873662313565,
+    "optimal_cost": -1.2,
+    "cost_gap": 1.715376451109131,
+    "normalized_accuracy": 0.3682730619511475,
+    "retained_accuracy": 0.9884689058410733
+  },
+  {
+    "noise_scale": 2.0,
+    "circuit_type": "standard",
+    "estimated_cost": -0.22328786405737777,
+    "baseline_cost": -0.2610008362698061,
+    "optimal_cost": -1.2,
+    "cost_gap": 0.9767121359426222,
+    "normalized_accuracy": 0.5058905552391605,
+    "retained_accuracy": 0.959837054526638
+  },
+  {
+    "noise_scale": 2.0,
+    "circuit_type": "biological",
+    "estimated_cost": 0.4963112393727565,
+    "baseline_cost": 0.5353873662313565,
+    "optimal_cost": -1.2,
+    "cost_gap": 1.6963112393727564,
+    "normalized_accuracy": 0.37087706545058585,
+    "retained_accuracy": 0.9774827640105163
+  },
+  {
+    "noise_scale": 4.0,
+    "circuit_type": "standard",
+    "estimated_cost": -0.18792421546690793,
+    "baseline_cost": -0.2610008362698061,
+    "optimal_cost": -1.2,
+    "cost_gap": 1.012075784533092,
+    "normalized_accuracy": 0.4969991725396431,
+    "retained_accuracy": 0.9221760533709106
+  },
+  {
+    "noise_scale": 4.0,
+    "circuit_type": "biological",
+    "estimated_cost": 0.46100053023051013,
+    "baseline_cost": 0.5353873662313565,
+    "optimal_cost": -1.2,
+    "cost_gap": 1.6610005302305102,
+    "normalized_accuracy": 0.3757984970838674,
+    "retained_accuracy": 0.9571353131592815
+  },
+  {
+    "noise_scale": 8.0,
+    "circuit_type": "standard",
+    "estimated_cost": -0.12350378785632232,
+    "baseline_cost": -0.2610008362698061,
+    "optimal_cost": -1.2,
+    "cost_gap": 1.0764962121436776,
+    "normalized_accuracy": 0.48158045950281164,
+    "retained_accuracy": 0.8535706380533143
+  },
+  {
+    "noise_scale": 8.0,
+    "circuit_type": "biological",
+    "estimated_cost": 0.40126450094125815,
+    "baseline_cost": 0.5353873662313565,
+    "optimal_cost": -1.2,
+    "cost_gap": 1.601264500941258,
+    "normalized_accuracy": 0.38442841919310927,
+    "retained_accuracy": 0.9227130104206269
+  },
+  {
+    "noise_scale": 16.0,
+    "circuit_type": "standard",
+    "estimated_cost": -0.015513555268158194,
+    "baseline_cost": -0.2610008362698061,
+    "optimal_cost": -1.2,
+    "cost_gap": 1.1844864447318417,
+    "normalized_accuracy": 0.45777349747883456,
+    "retained_accuracy": 0.7385649631183435
+  },
+  {
+    "noise_scale": 16.0,
+    "circuit_type": "biological",
+    "estimated_cost": 0.32005977990826917,
+    "baseline_cost": 0.5353873662313565,
+    "optimal_cost": -1.2,
+    "cost_gap": 1.5200597799082691,
+    "normalized_accuracy": 0.3968159834828998,
+    "retained_accuracy": 0.8759195840000251
+  }
+]
