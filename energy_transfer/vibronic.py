@@ -196,13 +196,8 @@ def run_structured(
     t_max_int  = t_end * 2.0 * np.pi * C_FS
     times_int  = np.linspace(0.0, t_max_int, n_steps)
 
-    result = qt.mesolve(
-        H,
-        rho0,
-        times_int,
-        c_ops=c_ops,
-        options={"nsteps": 50000, "rtol": 1e-8, "atol": 1e-10},
-    )
+    result = qt.mesolve(H, rho0, times_int, c_ops=c_ops,
+                        options={"nsteps": 50000, "rtol": 1e-8, "atol": 1e-10})
 
     # Partial trace over mode subspaces to get electronic reduced density matrix
     # Subsystem indices: 0=electronic, 1=mode1, 2=mode2

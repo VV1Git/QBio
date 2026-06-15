@@ -30,6 +30,7 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 from joblib import Parallel, delayed
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent))
 warnings.filterwarnings("ignore")
@@ -88,9 +89,6 @@ def scan_axis(param_name: str, values: np.ndarray,
 
     Returns (reff_ohm, reff_vib) arrays with shape (len(values),).
     """
-    print(f"  {param_name} sweep ({len(values)} points) …", flush=True)
-    t0 = time.time()
-
     def _kwargs(v):
         base = dict(lambda_=LAMBDA_CM, gamma_bath=GAMMA_CM, temperature=TEMPERATURE_K)
         if param_name == "lambda":
@@ -101,17 +99,20 @@ def scan_axis(param_name: str, values: np.ndarray,
             base["gamma_bath"] = v
         return base
 
-    ohm_vals = Parallel(n_jobs=n_jobs, verbose=0)(
-        delayed(_ohm)(R_OPT, THETA_OPT, **_kwargs(v)) for v in values
-    )
-    print(f"    Ohmic done in {time.time()-t0:.1f}s")
-    t0 = time.time()
+    ohm_vals = list(tqdm(
+        Parallel(n_jobs=n_jobs, return_as="generator")(
+            delayed(_ohm)(R_OPT, THETA_OPT, **_kwargs(v)) for v in values
+        ),
+        total=len(values), desc=f"{param_name} ohmic", unit="pt",
+    ))
 
-    vib_vals = Parallel(n_jobs=n_jobs, verbose=0)(
-        delayed(_vib)(R_OPT, THETA_OPT, t_end=t_end_vib, n_steps=n_steps_vib,
-                      **_kwargs(v)) for v in values
-    )
-    print(f"    Vibronic done in {time.time()-t0:.1f}s")
+    vib_vals = list(tqdm(
+        Parallel(n_jobs=n_jobs, return_as="generator")(
+            delayed(_vib)(R_OPT, THETA_OPT, t_end=t_end_vib, n_steps=n_steps_vib,
+                          **_kwargs(v)) for v in values
+        ),
+        total=len(values), desc=f"{param_name} vibronic", unit="pt",
+    ))
 
     return np.array(ohm_vals), np.array(vib_vals)
 
@@ -167,6 +168,8 @@ if __name__ == "__main__":
     parser.add_argument("--n-jobs", type=int, default=-1)
     args = parser.parse_args()
 
+    n_jobs = args.n_jobs
+
     n        = N_QUICK if args.quick else N_FULL
     t_vib    = 2000.0  if args.quick else 5000.0
     n_s_vib  = 150     if args.quick else 300
@@ -177,15 +180,14 @@ if __name__ == "__main__":
 
     print("=== Phase 5: Bath parameter sensitivity ===")
     print(f"  Geometry: r={R_OPT} Å, θ=0°  |  grid size: {n} per axis")
-
     print("\n[1/3] λ sweep")
-    ohm_lam, vib_lam = scan_axis("lambda",      lam_grid, t_vib, n_s_vib, args.n_jobs)
+    ohm_lam, vib_lam = scan_axis("lambda",      lam_grid, t_vib, n_s_vib, n_jobs)
 
     print("\n[2/3] T sweep")
-    ohm_tmp, vib_tmp = scan_axis("temperature",  tmp_grid, t_vib, n_s_vib, args.n_jobs)
+    ohm_tmp, vib_tmp = scan_axis("temperature",  tmp_grid, t_vib, n_s_vib, n_jobs)
 
     print("\n[3/3] γ sweep")
-    ohm_gam, vib_gam = scan_axis("gamma",        gam_grid, t_vib, n_s_vib, args.n_jobs)
+    ohm_gam, vib_gam = scan_axis("gamma",        gam_grid, t_vib, n_s_vib, n_jobs)
 
     np.savez(
         RESULTS_DIR / "p5_sensitivity_data.npz",

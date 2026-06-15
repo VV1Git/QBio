@@ -25,6 +25,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as ticker
 from joblib import Parallel, delayed
+from tqdm import tqdm
 
 # Allow running from the energy_transfer/ directory directly
 sys.path.insert(0, str(Path(__file__).parent))
@@ -130,14 +131,13 @@ def reproduce_figure2a(
     if theta_grid is None:
         theta_grid = np.linspace(0.0, np.pi / 2, 8)
 
-    print(f"  Scanning {len(r_grid)}×{len(theta_grid)} = {len(r_grid)*len(theta_grid)} points "
-          f"(secular Redfield, ~instantaneous) …")
-
     jobs = [(r, th) for r in r_grid for th in theta_grid]
-    results_flat = Parallel(n_jobs=n_jobs, verbose=0)(
-        delayed(_reff_at_point)(r, th, t_end, n_steps)
-        for r, th in jobs
-    )
+    results_flat = list(tqdm(
+        Parallel(n_jobs=n_jobs, return_as="generator")(
+            delayed(_reff_at_point)(r, th, t_end, n_steps) for r, th in jobs
+        ),
+        total=len(jobs), desc="Reff scan", unit="pt",
+    ))
 
     Reff_grid = np.array(results_flat).reshape(len(r_grid), len(theta_grid))
 

@@ -27,6 +27,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.colors as mcolors
 from joblib import Parallel, delayed
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent))
 warnings.filterwarnings("ignore")
@@ -68,31 +69,27 @@ def _vibronic_point(r, theta, t_end, n_steps):
 # ── Scan functions ─────────────────────────────────────────────────────────────
 
 def scan_ohmic(r_grid, theta_grid, n_jobs=-1) -> np.ndarray:
-    """Secular Redfield scan — microseconds per point."""
-    print(f"  Ohmic scan: {len(r_grid)}×{len(theta_grid)} points …", flush=True)
-    t0 = time.time()
+    """Secular Redfield scan — microseconds per point (pure NumPy, no GPU needed)."""
     jobs = [(r, th) for r in r_grid for th in theta_grid]
-    flat = Parallel(n_jobs=n_jobs, verbose=0)(
-        delayed(_ohmic_point)(r, th) for r, th in jobs
-    )
-    grid = np.array(flat).reshape(len(r_grid), len(theta_grid))
-    print(f"    done in {time.time()-t0:.1f}s")
-    return grid
+    flat = list(tqdm(
+        Parallel(n_jobs=n_jobs, return_as="generator")(
+            delayed(_ohmic_point)(r, th) for r, th in jobs
+        ),
+        total=len(jobs), desc="ohmic", unit="pt",
+    ))
+    return np.array(flat).reshape(len(r_grid), len(theta_grid))
 
 
 def scan_vibronic(r_grid, theta_grid, t_end, n_steps, n_jobs=-1) -> np.ndarray:
-    """Vibronic Lindblad scan — heavier, fully parallelised."""
-    total = len(r_grid) * len(theta_grid)
-    print(f"  Vibronic scan: {len(r_grid)}×{len(theta_grid)} = {total} points "
-          f"(~{total*3//60}–{total*6//60} min on 1 core) …", flush=True)
-    t0 = time.time()
+    """Vibronic Lindblad scan — parallelised over (r, θ) grid points."""
     jobs = [(r, th) for r in r_grid for th in theta_grid]
-    flat = Parallel(n_jobs=n_jobs, verbose=0)(
-        delayed(_vibronic_point)(r, th, t_end, n_steps) for r, th in jobs
-    )
-    grid = np.array(flat).reshape(len(r_grid), len(theta_grid))
-    print(f"    done in {time.time()-t0:.1f}s")
-    return grid
+    flat = list(tqdm(
+        Parallel(n_jobs=n_jobs, return_as="generator")(
+            delayed(_vibronic_point)(r, th, t_end, n_steps) for r, th in jobs
+        ),
+        total=len(jobs), desc="vibronic", unit="pt",
+    ))
+    return np.array(flat).reshape(len(r_grid), len(theta_grid))
 
 
 # ── Plotting ───────────────────────────────────────────────────────────────────
@@ -167,8 +164,11 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick",      action="store_true", help="Smaller grid, shorter propagation")
     parser.add_argument("--ohmic-only", action="store_true", help="Skip vibronic scan")
-    parser.add_argument("--n-jobs",     type=int, default=-1)
+    parser.add_argument("--n-jobs",     type=int, default=-1,
+                        help="Parallel workers (default: all cores)")
     args = parser.parse_args()
+
+    n_jobs = args.n_jobs
 
     r_grid     = R_GRID_QUICK     if args.quick else R_GRID_FULL
     theta_grid = THETA_GRID_QUICK if args.quick else THETA_GRID_FULL
@@ -176,9 +176,8 @@ if __name__ == "__main__":
     n_steps_vib = 150   if args.quick else 300
 
     print("=== Phase 4: Production Reff(r,θ) scan ===")
-
     print("\n[1/2] Ohmic (secular Redfield)")
-    ohmic_grid = scan_ohmic(r_grid, theta_grid, n_jobs=args.n_jobs)
+    ohmic_grid = scan_ohmic(r_grid, theta_grid, n_jobs=n_jobs)
 
     # Save after Ohmic in case vibronic is interrupted
     np.save(RESULTS_DIR / "p4_reff_ohmic.npy",  ohmic_grid)
@@ -189,7 +188,7 @@ if __name__ == "__main__":
     if not args.ohmic_only:
         print("\n[2/2] Vibronic (Lindblad mesolve)")
         vibronic_grid = scan_vibronic(r_grid, theta_grid, t_end_vib, n_steps_vib,
-                                      n_jobs=args.n_jobs)
+                                      n_jobs=n_jobs)
         np.save(RESULTS_DIR / "p4_reff_vibronic.npy", vibronic_grid)
 
         idx_o  = np.unravel_index(np.argmax(ohmic_grid),    ohmic_grid.shape)
