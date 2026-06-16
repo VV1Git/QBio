@@ -16,6 +16,8 @@ Hilbert-space ordering: electronic ⊗ mode-1 ⊗ mode-2
 
 from __future__ import annotations
 
+import warnings
+
 import numpy as np
 import qutip as qt
 
@@ -182,33 +184,90 @@ def run_structured(
     -------
     times [fs], rhos_el : list of reduced 4×4 electronic density matrices
     """
-    H   = build_vibronic_H(r, theta)
-    c_ops = _collapse_operators(temperature, lambda_, gamma_bath, gamma_vib)
+    from gpu_utils import gpu_active
 
-    # Initial state: |site1, vac1, vac2⟩
-    psi0 = qt.tensor(
-        qt.basis(DIM_EL, 0),
-        qt.basis(DIM_M1, 0),
-        qt.basis(DIM_M2, 0),
-    )
-    rho0 = psi0 * psi0.dag()
+    # Build H and c_ops with CSR (sparse ops, avoids any dense matmul on GPU)
+    _saved_dtype = qt.settings.core["default_dtype"]
+    qt.settings.core["default_dtype"] = "CSR"
+    try:
+        H     = build_vibronic_H(r, theta)
+        c_ops = _collapse_operators(temperature, lambda_, gamma_bath, gamma_vib)
+        psi0  = qt.tensor(
+            qt.basis(DIM_EL, 0),
+            qt.basis(DIM_M1, 0),
+            qt.basis(DIM_M2, 0),
+        )
+        rho0 = psi0 * psi0.dag()
+    finally:
+        qt.settings.core["default_dtype"] = _saved_dtype
 
-    t_max_int  = t_end * 2.0 * np.pi * C_FS
-    times_int  = np.linspace(0.0, t_max_int, n_steps)
+    t_max_int = t_end * 2.0 * np.pi * C_FS
+    times_int = np.linspace(0.0, t_max_int, n_steps)
 
-    result = qt.mesolve(H, rho0, times_int, c_ops=c_ops,
-                        options={"nsteps": 50000, "rtol": 1e-8, "atol": 1e-10})
+    if gpu_active():
+        import jax.numpy as jnp
+        import diffrax
 
-    # Partial trace over mode subspaces to get electronic reduced density matrix
-    # Subsystem indices: 0=electronic, 1=mode1, 2=mode2
-    rhos_el = [rho.ptrace([0]) for rho in result.states]
+        # 64×64 JAX arrays (~64 KB each) — negligible GPU memory.
+        # Avoids the 4096×4096 dense Liouvillian (256 MB) and cuBLAS-lt autotuning.
+        H_jax   = jnp.array(H.full())
+        c_jax   = jnp.array([c.full() for c in c_ops])       # (n_c, 64, 64)
+        cd_jax  = jnp.conj(c_jax).transpose(0, 2, 1)         # c†
+        ctc_jax = jnp.einsum("kij,kjl->kil", cd_jax, c_jax)  # c†c per operator
+
+        def _lindblad_rhs(t, y, args):
+            H_, c_, cd_, ctc_ = args
+            rho = y.reshape(DIM_FULL, DIM_FULL)
+            dr = -1j * (H_ @ rho - rho @ H_)
+            # sum_k [c_k ρ c_k† − ½ c_k†c_k ρ − ½ ρ c_k†c_k]
+            dr = dr + (
+                jnp.einsum("kij,jl,klm->im", c_, rho, cd_)
+                - 0.5 * jnp.einsum("kij,jl->il", ctc_, rho)
+                - 0.5 * jnp.einsum("ij,kjl->il", rho, ctc_)
+            )
+            return dr.ravel()
+
+        with warnings.catch_warnings():
+            warnings.filterwarnings("ignore", message="Complex dtype support in Diffrax")
+            sol = diffrax.diffeqsolve(
+                diffrax.ODETerm(_lindblad_rhs),
+                diffrax.Tsit5(),
+                t0=float(times_int[0]),
+                t1=float(times_int[-1]),
+                dt0=None,
+                y0=jnp.array(rho0.full().ravel()),
+                saveat=diffrax.SaveAt(ts=jnp.array(times_int)),
+                stepsize_controller=diffrax.PIDController(rtol=1e-8, atol=1e-10),
+                max_steps=200_000,
+                args=(H_jax, c_jax, cd_jax, ctc_jax),
+            )
+
+        ys = np.array(sol.ys)                        # (T, DIM_FULL²) complex
+        rhos_full = ys.reshape(-1, DIM_FULL, DIM_FULL)
+        # Batched ptrace over modes: rho_el[t,i,j] = Σ_m rho[t, 16i+m, 16j+m]
+        n_m_sq = DIM_M1 * DIM_M2
+        rho_el_np = np.einsum(
+            "tikjk->tij",
+            rhos_full.reshape(-1, DIM_EL, n_m_sq, DIM_EL, n_m_sq),
+        )
+        rhos_el = [qt.Qobj(rho_el_np[t], dims=[[DIM_EL], [DIM_EL]])
+                   for t in range(len(times_int))]
+    else:
+        # CSR Liouvillian + scipy LSODA — fast (~2.5 s)
+        L = qt.liouvillian(H, c_ops)
+        result = qt.mesolve(
+            L, rho0, times_int, c_ops=[],
+            options={"method": "adams", "nsteps": 50000, "rtol": 1e-8, "atol": 1e-10},
+        )
+        rhos_el = [rho.ptrace([0]) for rho in result.states]
+
     times_fs = times_int / (2.0 * np.pi * C_FS)
     return times_fs, rhos_el
 
 
 def population_vibronic(rhos_el: list[qt.Qobj], site: int) -> np.ndarray:
     """Extract P_site(t) from the reduced electronic density matrices."""
-    return np.array([float(rho[site, site].real) for rho in rhos_el])
+    return np.array([rho.full()[site, site].real for rho in rhos_el])
 
 
 def vibronic_reff(

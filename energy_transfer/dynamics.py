@@ -21,11 +21,59 @@ from spectral_density import gamma_Ohmic, LAMBDA_CM, GAMMA_CM, TEMPERATURE_K
 
 
 N_SITES = 4
+# t_internal = t_fs × 2π × C_FS  makes H × t_internal dimensionless (H in cm⁻¹)
+C_FS = 3e-5  # speed of light in cm/fs
 
 
 def _basis_projectors() -> list[qt.Qobj]:
     """Return |i⟩⟨i| projectors for i = 0..3 as QuTiP Qobjs."""
     return [qt.ket2dm(qt.basis(N_SITES, i)) for i in range(N_SITES)]
+
+
+def _make_spectral_fn(lambda_: float, gamma_bath: float, temperature: float):
+    """Return a spectral function closure for brmesolve a_ops."""
+    def _fn(omega):
+        return gamma_Ohmic(omega, lambda_=lambda_, gamma=gamma_bath, temperature=temperature)
+    return _fn
+
+
+def _secular_setup(
+    r: float,
+    theta: float,
+    lambda_: float,
+    gamma_bath: float,
+    temperature: float,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Build the Pauli rate matrix K for secular Redfield propagation.
+
+    Vectorised: the full N×N off-diagonal rate matrix is computed in one
+    numpy call rather than a Python double loop.
+
+    Returns
+    -------
+    K  : (N_SITES, N_SITES) Pauli rate matrix  dP/dt = K P
+    w4 : (N_SITES,) weight of site 4 in each exciton  |⟨site4|α⟩|²
+    P0 : (N_SITES,) initial exciton populations  |⟨α|site1⟩|²
+    """
+    H_np = build_electronic_H(r, theta)
+    H_np -= np.mean(SITE_ENERGIES_CM) * np.eye(N_SITES)
+    eigvals, U = np.linalg.eigh(H_np)
+
+    F = (U ** 2).T @ (U ** 2)          # Förster overlap: F[α,β] = Σᵢ U[i,α]² U[i,β]²
+
+    omega_matrix = eigvals[:, None] - eigvals[None, :]   # (N, N), ω[α,β] = Eα − Eβ
+    gamma_matrix = gamma_Ohmic(omega_matrix, lambda_=lambda_, gamma=gamma_bath,
+                               temperature=temperature)
+    np.fill_diagonal(gamma_matrix, 0.0)                  # no self-transition
+    Gamma = F * gamma_matrix                             # Gamma[α,β] = rate FROM α TO β
+
+    K = Gamma.T.copy()                                   # K[β,α] = gain into β from α
+    np.fill_diagonal(K, -Gamma.sum(axis=1))              # total loss from α
+
+    w4 = U[3, :] ** 2   # |⟨site4|α⟩|²
+    P0 = U[0, :] ** 2   # initial exciton pops (excitation on site 1)
+    return K, w4, P0
 
 
 def run_ohmic(
@@ -44,7 +92,7 @@ def run_ohmic(
     ----------
     r          : intra-dimer distance (Å)
     theta      : dipole angle (radians)
-    t_end      : propagation end time (fs, converted to cm internally)
+    t_end      : propagation end time (fs)
     n_steps    : number of output time points
     lambda_    : bath reorganisation energy (cm⁻¹)
     gamma_bath : Drude cut-off (cm⁻¹)
@@ -55,58 +103,26 @@ def run_ohmic(
     times : (n_steps,) array  [fs]
     rhos  : list of n_steps density matrices (QuTiP Qobj)
     """
-    # Convert time from fs to cm (using c = 3e-5 cm/fs so that ωt is dimensionless
-    # when ω is in cm⁻¹ and t is in 1/(2πc)):
-    #   t [cm⁻¹⁻¹] = t [fs] × 2π × 3e-5 cm/fs  → t [cm] = t[fs] / (2π × 3e-5) × 2π × c
-    # QuTiP brmesolve uses ħ=1, so time is in units of 1/cm⁻¹.
-    # 1 fs = 1e-15 s;  1 cm⁻¹ = 2π × 3e10 rad/s  →  1/(cm⁻¹) = 5.309 fs
-    FS_PER_INV_CM = 1.0 / (2.0 * np.pi * 3e-5)   # ≈ 5309 fs per (cm⁻¹)⁻¹  [wrong sign]
-    # Correct: 1 cm⁻¹ × 2πc = 2π × 3×10¹⁰ Hz → period = 1/(3×10¹⁰ cm/s × 1 cm⁻¹) s
-    #        = 1/(3×10¹⁰) s = 3.33×10⁻¹¹ s ≈ 33333 fs  — no, that's 1 period.
-    # Properly:  ω [rad/fs] = 2π × c [cm/fs] × ω [cm⁻¹]
-    #            c = 3×10-5 cm/fs
-    # So ωt [dimensionless] = 2π × 3e-5 cm/fs × ω [cm⁻¹] × t [fs]
-    # For brmesolve we need t in units where H*t is dimensionless with H in cm⁻¹.
-    # → t_internal [cm] = t [fs] × 2π × 3e-5
+    t_max_int = t_end * 2.0 * np.pi * C_FS
+    times_int = np.linspace(0.0, t_max_int, n_steps)
 
-    C_LIGHT_CM_FS = 3e-5   # speed of light in cm/fs
-
-    t_max_internal = t_end * 2.0 * np.pi * C_LIGHT_CM_FS
-    times_internal = np.linspace(0.0, t_max_internal, n_steps)
-
-    # Hamiltonian (cm⁻¹) as QuTiP Qobj.
-    # Subtract the mean site energy so oscillations are ~400 cm⁻¹ not ~13000 cm⁻¹;
-    # this dramatically reduces ODE stiffness without affecting the physics.
     H_np = build_electronic_H(r, theta)
-    H_np = H_np - np.mean(SITE_ENERGIES_CM) * np.eye(N_SITES)
-    H    = qt.Qobj(H_np)
+    H_np -= np.mean(SITE_ENERGIES_CM) * np.eye(N_SITES)
+    H = qt.Qobj(H_np)
 
-    # Bath coupling: each site couples to its own bath via the projector |i⟩⟨i|
-    projectors = _basis_projectors()
+    spectral_fn = _make_spectral_fn(lambda_, gamma_bath, temperature)
+    a_ops = [(proj, spectral_fn) for proj in _basis_projectors()]
 
-    def _make_gamma(lambda_: float, gamma_b: float, temp: float):
-        """Return a closure for the bath spectral function accepted by brmesolve."""
-        def _gamma(omega):
-            return gamma_Ohmic(omega, lambda_=lambda_, gamma=gamma_b, temperature=temp)
-        return _gamma
-
-    spectral_fn = _make_gamma(lambda_, gamma_bath, temperature)
-    a_ops = [(proj, spectral_fn) for proj in projectors]
-
-    # Initial state: full excitation on site 0 (= site 1 in 1-indexed notation)
     rho0 = qt.basis(N_SITES, 0) * qt.basis(N_SITES, 0).dag()
 
     result = qt.brmesolve(
-        H,
-        rho0,
-        times_internal,
+        H, rho0, times_int,
         a_ops=a_ops,
         sec_cutoff=0.1,
-        options={"nsteps": 100000, "rtol": 1e-8, "atol": 1e-10,
-                 "method": "adams"},
+        options={"nsteps": 100000, "rtol": 1e-8, "atol": 1e-10, "method": "adams"},
     )
 
-    times_fs = times_internal / (2.0 * np.pi * C_LIGHT_CM_FS)
+    times_fs = times_int / (2.0 * np.pi * C_FS)
     return times_fs, result.states
 
 
@@ -115,7 +131,7 @@ def population(rhos: list[qt.Qobj], site: int) -> np.ndarray:
     return np.array([float(rho[site, site].real) for rho in rhos])
 
 
-# ── Secular Redfield rate matrix (Fix 2) ─────────────────────────────────────
+# ── Secular Redfield rate matrix ──────────────────────────────────────────────
 
 def secular_reff(
     r: float,
@@ -135,65 +151,29 @@ def secular_reff(
 
         Γ_{α→β} = [Σᵢ (U[i,α] U[i,β])²] × γ(Eα − Eβ)
 
-    K is then 4×4, diagonalised analytically, and P₄(t) is computed as a
-    sum of four real exponentials — microseconds per geometry point.
+    K is 4×4, diagonalised analytically, and P₄(t) is computed as a sum of
+    four real exponentials — microseconds per geometry point.
 
     Parameters
     ----------
     r, theta  : geometry
-    t_end     : propagation window (fs); long enough to see full transfer
+    t_end     : propagation window (fs)
     n_steps   : time-grid points for P₄(t)
-    lambda_, gamma_bath, temperature : bath parameters
 
     Returns
     -------
     times [fs], P4 [dimensionless], Reff [fs⁻¹]
     """
     from efficiency import compute_Reff
-    from scipy.linalg import expm as _expm
 
-    C_FS = 3e-5  # cm/fs
+    K, w4, P0 = _secular_setup(r, theta, lambda_, gamma_bath, temperature)
 
-    H_np = build_electronic_H(r, theta)
-    H_np -= np.mean(SITE_ENERGIES_CM) * np.eye(N_SITES)
+    t_max_int = t_end * 2.0 * np.pi * C_FS
+    times_int = np.linspace(0.0, t_max_int, n_steps)
+    times_fs  = times_int / (2.0 * np.pi * C_FS)
 
-    eigvals, U = np.linalg.eigh(H_np)   # U[:,α] = eigenstate α in site basis
-
-    n = N_SITES
-    # Förster overlap factors: F[α,β] = Σᵢ U[i,α]² U[i,β]²
-    F = (U ** 2).T @ (U ** 2)            # (n,n), F[α,β] = F[β,α]
-
-    # Redfield rates Γ[α,β] = rate FROM α TO β
-    Gamma = np.zeros((n, n))
-    for a in range(n):
-        for b in range(n):
-            if a == b:
-                continue
-            omega_ab = eigvals[a] - eigvals[b]   # E_a - E_b
-            Gamma[a, b] = F[a, b] * gamma_Ohmic(
-                omega_ab, lambda_=lambda_, gamma=gamma_bath, temperature=temperature
-            )
-
-    # Pauli rate matrix  dP/dt = K P
-    # K[β,α] = Γ[α→β]  (gain into β from α)
-    # K[α,α] = −Σ_{β≠α} Γ[α→β]  (total loss from α)
-    K = Gamma.T.copy()
-    np.fill_diagonal(K, -Gamma.sum(axis=1))
-
-    # Initial exciton populations: excitation on site 0 (site 1)
-    P0 = U[0, :] ** 2                    # Pα(0) = |⟨α|site 1⟩|²
-
-    # Weights of site 4 (index 3) in each exciton
-    w4 = U[3, :] ** 2                    # |⟨site4|α⟩|²
-
-    # Analytical propagation via eigendecomposition of K
     klam, kV = np.linalg.eig(K)
     c = (w4 @ kV) * np.linalg.solve(kV, P0)   # spectral coefficients
-
-    # Convert t_end from fs to internal (cm⁻¹)⁻¹ units
-    t_max_int = t_end * 2.0 * np.pi * C_FS
-    times_int  = np.linspace(0.0, t_max_int, n_steps)
-    times_fs   = times_int / (2.0 * np.pi * C_FS)
 
     P4 = np.real(
         np.sum(c[None, :] * np.exp(klam[None, :] * times_int[:, None]), axis=1)
@@ -201,6 +181,128 @@ def secular_reff(
 
     Reff = compute_Reff(times_fs, P4)
     return times_fs, P4, Reff
+
+
+def run_ohmic_with_trap(
+    r: float,
+    theta: float,
+    kappa_trap_fs: float = 0.001,
+    t_end: float = 15_000.0,
+    n_steps: int = 500,
+    lambda_: float = LAMBDA_CM,
+    gamma_bath: float = GAMMA_CM,
+    temperature: float = TEMPERATURE_K,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Bloch-Redfield dynamics on a 5-site system: sites 1–4 (Frenkel) + trap (RC).
+
+    A Lindblad collapse operator c_trap = √κ_trap × |trap⟩⟨site4⟩ drains
+    excitation from site 4 irreversibly into the reaction-centre trap state.
+    Q(t) = P_trap(t) rises from 0 → 1, showing complete energy harvesting.
+
+    Parameters
+    ----------
+    kappa_trap_fs : trapping rate at site 4 [fs⁻¹] (default 0.001 = 1 ps⁻¹)
+    t_end         : propagation window [fs]
+    n_steps       : output time points
+
+    Returns
+    -------
+    times_fs [fs], P4 [site-4 population], Q [trap population 0→1]
+    """
+    N5 = N_SITES + 1
+
+    H_np = build_electronic_H(r, theta)
+    H_np -= np.mean(SITE_ENERGIES_CM) * np.eye(N_SITES)
+
+    H5 = np.zeros((N5, N5))
+    H5[:N_SITES, :N_SITES] = H_np
+    H = qt.Qobj(H5)
+
+    spectral_fn = _make_spectral_fn(lambda_, gamma_bath, temperature)
+    a_ops = [
+        (qt.ket2dm(qt.basis(N5, i)), spectral_fn)
+        for i in range(N_SITES)
+    ]
+
+    kappa_cm = kappa_trap_fs / (2.0 * np.pi * C_FS)
+    c_trap_arr = np.zeros((N5, N5))
+    c_trap_arr[N_SITES, N_SITES - 1] = np.sqrt(kappa_cm)   # |trap⟩⟨site4|
+    c_trap = qt.Qobj(c_trap_arr)
+
+    rho0 = qt.basis(N5, 0) * qt.basis(N5, 0).dag()
+
+    t_max_int = t_end * 2.0 * np.pi * C_FS
+    times_int = np.linspace(0.0, t_max_int, n_steps)
+
+    result = qt.brmesolve(
+        H, rho0, times_int,
+        a_ops=a_ops, c_ops=[c_trap],
+        sec_cutoff=0.1,
+        options={"nsteps": 100000, "rtol": 1e-8, "atol": 1e-10, "method": "adams"},
+    )
+
+    times_fs = times_int / (2.0 * np.pi * C_FS)
+    P4 = np.array([float(rho[N_SITES - 1, N_SITES - 1].real) for rho in result.states])
+    Q  = np.array([float(rho[N_SITES,     N_SITES].real)     for rho in result.states])
+
+    return times_fs, P4, Q
+
+
+def secular_with_trap(
+    r: float,
+    theta: float,
+    kappa_trap_fs: float = 0.002,
+    t_end: float = 10_000.0,
+    n_steps: int = 500,
+    lambda_: float = LAMBDA_CM,
+    gamma_bath: float = GAMMA_CM,
+    temperature: float = TEMPERATURE_K,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Secular Pauli propagation with irreversible trapping at site 4 (reaction centre).
+
+    Extends the Pauli rate matrix with a sink at site 4: each exciton α loses
+    population at rate w₄[α] × κ_trap.  The cumulative yield Q(t) rises 0 → 1,
+    reflecting the fraction of excitation irreversibly trapped by time t.
+
+    Parameters
+    ----------
+    kappa_trap_fs : trapping rate at site 4 in fs⁻¹  (default 0.002 = 2 ps⁻¹)
+    t_end         : propagation window [fs]
+    n_steps       : time-grid points
+
+    Returns
+    -------
+    times_fs  : (n_steps,) [fs]
+    P4_site   : (n_steps,) transient population at site 4 during dynamics
+    Q         : (n_steps,) cumulative trapping yield, 0 → 1
+    """
+    K, w4, P0 = _secular_setup(r, theta, lambda_, gamma_bath, temperature)
+
+    kappa_trap_cm = kappa_trap_fs / (2.0 * np.pi * C_FS)
+    K -= np.diag(w4 * kappa_trap_cm)   # add irreversible sink at site 4
+
+    t_max_int = t_end * 2.0 * np.pi * C_FS
+    times_int = np.linspace(0.0, t_max_int, n_steps)
+    times_fs  = times_int / (2.0 * np.pi * C_FS)
+
+    klam, kV = np.linalg.eig(K)
+    c_all = np.linalg.solve(kV, P0)
+
+    w4_kV = w4 @ kV
+    P4_site = np.real(
+        np.sum(
+            w4_kV[None, :] * c_all[None, :] * np.exp(klam[None, :] * times_int[:, None]),
+            axis=1,
+        )
+    ).clip(0.0, 1.0)
+
+    dt_fs = times_fs[1] - times_fs[0] if n_steps > 1 else 1.0
+    Q = np.cumsum(P4_site) * dt_fs * kappa_trap_fs
+    Q = np.clip(Q, 0.0, 1.0)
+
+    return times_fs, P4_site, Q
 
 
 if __name__ == "__main__":

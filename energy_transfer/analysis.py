@@ -22,8 +22,8 @@ from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
 from scipy.linalg import eigh as _eigh
+from tqdm import tqdm
 
 sys.path.insert(0, str(Path(__file__).parent))
 
@@ -37,6 +37,10 @@ RESULTS_DIR = Path(__file__).parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
 
 C_FS = 3e-5   # cm/fs
+
+# Mode frequencies for annotations
+OMEGA1_CM_ANNOT = 726.0
+OMEGA2_CM_ANNOT = 243.0
 
 
 # ── Figure 3: P₄(t) comparison ───────────────────────────────────────────────
@@ -53,21 +57,28 @@ def figure3_p4_comparison(t_end: float = 5000.0, n_steps: int = 400) -> None:
     for ax in axes:
         ax.set_facecolor("#fffdf7")
 
+    # Run all 4 solves with a progress bar, then plot
+    tasks = [(ax, r_val, title, variant)
+             for (ax, (r_val, title)) in zip(axes, geometries)
+             for variant in ("ohmic", "vibronic")]
+    results: dict = {}
+
+    with tqdm(tasks, desc="Fig 3", unit="solve") as bar:
+        for ax, r_val, title, variant in bar:
+            bar.set_description(f"Fig 3  r={r_val} Å  {variant}")
+            t0 = time.time()
+            if variant == "ohmic":
+                t_, rhos_ = run_ohmic(r=r_val, theta=0.0, t_end=t_end, n_steps=n_steps)
+                P4_ = population(rhos_, site=3)
+            else:
+                t_, rhos_el_ = run_structured(r=r_val, theta=0.0, t_end=t_end, n_steps=n_steps)
+                P4_ = population_vibronic(rhos_el_, site=3)
+            results[(r_val, variant)] = (t_, P4_)
+            tqdm.write(f"  r={r_val} Å  {variant}: {time.time()-t0:.1f}s  P4(∞)={P4_[-1]:.3f}")
+
     for ax, (r_val, title) in zip(axes, geometries):
-        print(f"\n  {title}")
-
-        print("    Variant A (Ohmic/Redfield) …", end="", flush=True)
-        t0 = time.time()
-        t_A, rhos_A = run_ohmic(r=r_val, theta=0.0, t_end=t_end, n_steps=n_steps)
-        P4_A = population(rhos_A, site=3)
-        print(f" {time.time()-t0:.1f}s  P4(∞)={P4_A[-1]:.3f}")
-
-        print("    Variant B (vibronic/Lindblad) …", end="", flush=True)
-        t0 = time.time()
-        t_B, rhos_el_B = run_structured(r=r_val, theta=0.0, t_end=t_end, n_steps=n_steps)
-        P4_B = population_vibronic(rhos_el_B, site=3)
-        print(f" {time.time()-t0:.1f}s  P4(∞)={P4_B[-1]:.3f}")
-
+        t_A, P4_A = results[(r_val, "ohmic")]
+        t_B, P4_B = results[(r_val, "vibronic")]
         ax.plot(t_A, P4_A, color="#1a6e8c", lw=2.0, label="Variant A (Ohmic)")
         ax.plot(t_B, P4_B, color="#d45f1e", lw=2.0, ls="--", label="Variant B (vibronic)")
         ax.set_xlabel("Time (fs)", fontsize=11)
@@ -102,14 +113,13 @@ def _exciton_basis_rhos(rhos_dm: list, r: float, theta: float) -> tuple[np.ndarr
     H_np -= np.mean(SITE_ENERGIES_CM) * np.eye(4)
     eigvals, U = _eigh(H_np)
 
-    T = len(rhos_dm)
-    rho_ex = np.zeros((T, 4, 4), dtype=complex)
-    for k, rho in enumerate(rhos_dm):
-        if hasattr(rho, "full"):
-            rho_np = rho.full()
-        else:
-            rho_np = np.array(rho)
-        rho_ex[k] = U.conj().T @ rho_np @ U
+    # Batch transform all timesteps at once: rho_ex[k] = U† @ rho[k] @ U
+    rhos_np = np.array([
+        rho.full() if hasattr(rho, "full") else np.array(rho)
+        for rho in rhos_dm
+    ])  # (T, 4, 4)
+    Uc = U.conj().T
+    rho_ex = np.einsum("ij,kjl,lm->kim", Uc, rhos_np, U)
 
     return eigvals, rho_ex
 
@@ -130,37 +140,36 @@ def figure4_coherence_spectra(
     """
     print(f"\n  Coherence spectra at r={r} Å, θ={np.degrees(theta):.0f}°")
 
-    print("    Variant A …", end="", flush=True)
-    t0 = time.time()
-    t_A, rhos_A = run_ohmic(r=r, theta=theta, t_end=t_end, n_steps=n_steps)
-    _, rho_ex_A = _exciton_basis_rhos(rhos_A, r, theta)
-    print(f" {time.time()-t0:.1f}s")
+    with tqdm(total=2, desc="Fig 4", unit="solve") as bar:
+        bar.set_description("Fig 4  Variant A")
+        t0 = time.time()
+        t_A, rhos_A = run_ohmic(r=r, theta=theta, t_end=t_end, n_steps=n_steps)
+        _, rho_ex_A = _exciton_basis_rhos(rhos_A, r, theta)
+        tqdm.write(f"  Variant A: {time.time()-t0:.1f}s")
+        bar.update(1)
 
-    print("    Variant B …", end="", flush=True)
-    t0 = time.time()
-    t_B, rhos_el_B = run_structured(r=r, theta=theta, t_end=t_end, n_steps=n_steps)
-    _, rho_ex_B = _exciton_basis_rhos(rhos_el_B, r, theta)
-    eigvals, _ = _exciton_basis_rhos(rhos_el_B[:1], r, theta)
-    print(f" {time.time()-t0:.1f}s")
+        bar.set_description("Fig 4  Variant B")
+        t0 = time.time()
+        t_B, rhos_el_B = run_structured(r=r, theta=theta, t_end=t_end, n_steps=n_steps)
+        _, rho_ex_B = _exciton_basis_rhos(rhos_el_B, r, theta)
+        eigvals, _ = _exciton_basis_rhos(rhos_el_B[:1], r, theta)
+        tqdm.write(f"  Variant B: {time.time()-t0:.1f}s")
+        bar.update(1)
 
-    def _spectrum(times, rho_ex, label):
+    def _spectrum(times, rho_ex):
         """FFT of the sum of |off-diagonal| exciton coherences."""
         mask = (times >= window_start_fs) & (times <= window_end_fs)
         t_win = times[mask]
         if t_win.size < 4:
             return np.array([0.0]), np.array([0.0])
 
-        # Sum |ρ_{αβ}| over all α<β pairs
-        coh_sum = np.zeros(t_win.size, dtype=float)
-        for a in range(4):
-            for b in range(a + 1, 4):
-                coh_sum += np.abs(rho_ex[mask, a, b])
+        # Sum |ρ_{αβ}| over all α<β pairs — vectorised with upper-triangle mask
+        triu = np.triu(np.ones((4, 4), dtype=bool), k=1)
+        coh_sum = np.sum(np.abs(rho_ex[mask][:, triu]), axis=1)
 
-        dt_fs   = np.mean(np.diff(t_win))
-        n       = t_win.size
-        freqs   = np.fft.rfftfreq(n, d=dt_fs)     # fs⁻¹
-        freqs_cm = freqs / C_FS                    # cm⁻¹  (ν = f / c)
-        power   = np.abs(np.fft.rfft(coh_sum)) ** 2
+        dt_fs    = np.mean(np.diff(t_win))
+        freqs_cm = np.fft.rfftfreq(t_win.size, d=dt_fs) / C_FS   # cm⁻¹
+        power    = np.abs(np.fft.rfft(coh_sum)) ** 2
         return freqs_cm, power
 
     fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), dpi=150, sharey=False)
@@ -174,7 +183,7 @@ def figure4_coherence_spectra(
         ],
     ):
         ax.set_facecolor("#fffdf7")
-        freqs_cm, power = _spectrum(times, rho_ex, variant)
+        freqs_cm, power = _spectrum(times, rho_ex)
 
         # Normalise to max = 1 for comparison
         pmax = power.max()
@@ -219,15 +228,12 @@ def figure4_coherence_spectra(
     print(f"  Saved {out}")
 
 
-# Mode frequencies for annotations
-OMEGA1_CM_ANNOT = 726.0
-OMEGA2_CM_ANNOT = 243.0
-
-
 # ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import argparse
+    from gpu_utils import setup_gpu
+    setup_gpu()
 
     parser = argparse.ArgumentParser(description="Phase 3 analysis: comparison + coherence spectra")
     parser.add_argument("--quick", action="store_true", help="Faster low-res run")

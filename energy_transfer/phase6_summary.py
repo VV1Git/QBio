@@ -73,16 +73,17 @@ def _compute_coherence(rhos, r, theta, is_vibronic=False):
     H_np = build_electronic_H(r, theta)
     H_np -= np.mean(SITE_ENERGIES_CM) * np.eye(4)
     _, U = _eigh(H_np)
-    T = len(rhos)
-    coh_sum = np.zeros(T)
-    for k, rho in enumerate(rhos):
-        rho_el = rho.ptrace([0]) if is_vibronic else rho
-        rho_np = np.array(rho_el.full())
-        rho_ex = U.conj().T @ rho_np @ U
-        for a in range(4):
-            for b in range(a + 1, 4):
-                coh_sum[k] += abs(rho_ex[a, b])
-    return coh_sum
+
+    # Batch partial-trace and basis transform all timesteps at once
+    rhos_np = np.array([
+        np.array((rho.ptrace([0]) if is_vibronic else rho).full())
+        for rho in rhos
+    ])  # (T, 4, 4)
+    Uc = U.conj().T
+    rhos_ex = np.einsum("ij,kjl,lm->kim", Uc, rhos_np, U)  # (T, 4, 4)
+
+    triu = np.triu(np.ones((4, 4), dtype=bool), k=1)
+    return np.sum(np.abs(rhos_ex[:, triu]), axis=1)  # (T,)
 
 
 # ── Panel helpers ──────────────────────────────────────────────────────────────
@@ -168,21 +169,31 @@ def build_summary(recompute: bool = False) -> None:
     # ── load / compute all data ──
     print("Loading Phase 4 heatmap data …")
     try:
-        r_grid    = np.load(RESULTS_DIR / "p4_r_grid.npy")
-        th_grid   = np.load(RESULTS_DIR / "p4_theta_grid.npy")
-        ohm_grid  = np.load(RESULTS_DIR / "p4_reff_ohmic.npy")
-        vib_grid  = np.load(RESULTS_DIR / "p4_reff_vibronic.npy")
-        have_p4   = True
+        r_ohm    = np.load(RESULTS_DIR / "p4_r_grid.npy")
+        th_ohm   = np.load(RESULTS_DIR / "p4_theta_grid.npy")
+        ohm_grid = np.load(RESULTS_DIR / "p4_reff_ohmic.npy")
+        # Load separate vibronic grid files (new format); fall back to ohmic grid
+        try:
+            r_vib  = np.load(RESULTS_DIR / "p4_r_grid_vib.npy")
+            th_vib = np.load(RESULTS_DIR / "p4_theta_grid_vib.npy")
+        except FileNotFoundError:
+            r_vib  = r_ohm
+            th_vib = th_ohm
+        vib_grid = np.load(RESULTS_DIR / "p4_reff_vibronic.npy")
+        r_grid   = r_ohm
+        th_grid  = th_ohm
+        have_p4  = True
     except FileNotFoundError:
         print("  Phase 4 data missing — will use Phase 1 heatmap data")
         try:
-            r_grid   = np.load(RESULTS_DIR / "r_grid.npy")
-            th_grid  = np.load(RESULTS_DIR / "theta_grid.npy")
+            r_ohm    = np.load(RESULTS_DIR / "r_grid.npy")
+            th_ohm   = np.load(RESULTS_DIR / "theta_grid.npy")
             ohm_grid = np.load(RESULTS_DIR / "reff_ohmic.npy")
-            vib_grid = None
-            have_p4  = False
+            r_vib = r_ohm; th_vib = th_ohm; vib_grid = None
+            r_grid = r_ohm; th_grid = th_ohm
+            have_p4 = False
         except FileNotFoundError:
-            r_grid = th_grid = ohm_grid = vib_grid = None
+            r_ohm = th_ohm = r_vib = th_vib = r_grid = th_grid = ohm_grid = vib_grid = None
             have_p4 = False
 
     print("Loading Phase 5 sensitivity data …")
@@ -194,17 +205,23 @@ def build_summary(recompute: bool = False) -> None:
         have_p5 = False
         p5 = {}
 
-    print("Computing/loading dynamics at optimal geometry …")
+    print("Computing dynamics at optimal geometry …")
     from dynamics import run_ohmic, population
     from vibronic import run_structured, population_vibronic
+    from tqdm import tqdm
 
-    t_A, rhos_A = run_ohmic(r=11.3, theta=0.0, t_end=5000.0, n_steps=300)
-    P4_A = population(rhos_A, site=3)
-    coh_A = _compute_coherence(rhos_A, 11.3, 0.0, is_vibronic=False)
+    with tqdm(total=2, desc="Dynamics", unit="solve") as bar:
+        bar.set_description("Ohmic (brmesolve)")
+        t_A, rhos_A = run_ohmic(r=11.3, theta=0.0, t_end=5000.0, n_steps=300)
+        P4_A = population(rhos_A, site=3)
+        coh_A = _compute_coherence(rhos_A, 11.3, 0.0, is_vibronic=False)
+        bar.update(1)
 
-    t_B, rhos_el_B = run_structured(r=11.3, theta=0.0, t_end=5000.0, n_steps=300)
-    P4_B = population_vibronic(rhos_el_B, site=3)
-    coh_B = _compute_coherence(rhos_el_B, 11.3, 0.0, is_vibronic=True)
+        bar.set_description("Vibronic (CSR+scipy)")
+        t_B, rhos_el_B = run_structured(r=11.3, theta=0.0, t_end=5000.0, n_steps=300)
+        P4_B = population_vibronic(rhos_el_B, site=3)
+        coh_B = _compute_coherence(rhos_el_B, 11.3, 0.0, is_vibronic=True)
+        bar.update(1)
 
     # ── build figure ──
     fig = plt.figure(figsize=(16, 9), dpi=150)
@@ -229,17 +246,28 @@ def build_summary(recompute: bool = False) -> None:
 
     # Panel 3: Vibronic heatmap
     if vib_grid is not None:
-        _panel_heatmap(axes[2], fig, r_grid, th_grid, vib_grid,
+        _panel_heatmap(axes[2], fig, r_vib, th_vib, vib_grid,
                        "Reff(r,θ) — Vibronic")
     elif ohm_grid is not None:
         axes[2].text(0.5, 0.5, "Vibronic scan\nnot available", ha="center",
                      va="center", transform=axes[2].transAxes, fontsize=10)
         axes[2].set_title("Reff(r,θ) — Vibronic", fontsize=9)
 
-    # Panel 4: ΔReff
+    # Panel 4: ΔReff — interpolate vibronic onto ohmic grid if grids differ
     if ohm_grid is not None and vib_grid is not None:
-        delta = vib_grid - ohm_grid
-        _panel_heatmap(axes[3], fig, r_grid, th_grid, delta,
+        if not (np.array_equal(r_vib, r_ohm) and np.array_equal(th_vib, th_ohm)):
+            from scipy.interpolate import RegularGridInterpolator
+            interp = RegularGridInterpolator(
+                (r_vib, th_vib), vib_grid, method="linear",
+                bounds_error=False, fill_value=0.0,
+            )
+            R_mg, T_mg = np.meshgrid(r_ohm, th_ohm, indexing="ij")
+            vib_on_ohm = interp(np.column_stack([R_mg.ravel(), T_mg.ravel()])
+                                ).reshape(len(r_ohm), len(th_ohm))
+        else:
+            vib_on_ohm = vib_grid
+        delta = vib_on_ohm - ohm_grid
+        _panel_heatmap(axes[3], fig, r_ohm, th_ohm, delta,
                        "ΔReff (vibronic − Ohmic)", cmap="RdBu_r", center=True)
     elif ohm_grid is not None:
         axes[3].text(0.5, 0.5, "ΔReff requires\nPhase 4 vibronic data",
@@ -273,16 +301,11 @@ def build_summary(recompute: bool = False) -> None:
     if ohm_grid is not None:
         idx = np.unravel_index(np.argmax(ohm_grid), ohm_grid.shape)
         print(f"  Ohmic   peak Reff: {ohm_grid[idx]*1e3:.3f} ps⁻¹ at "
-              f"r={r_grid[idx[0]]:.1f} Å, θ={np.degrees(th_grid[idx[1]]):.0f}°")
+              f"r={r_ohm[idx[0]]:.1f} Å, θ={np.degrees(th_ohm[idx[1]]):.0f}°")
     if vib_grid is not None:
         idx2 = np.unravel_index(np.argmax(vib_grid), vib_grid.shape)
         print(f"  Vibronic peak Reff: {vib_grid[idx2]*1e3:.3f} ps⁻¹ at "
-              f"r={r_grid[idx2[0]]:.1f} Å, θ={np.degrees(th_grid[idx2[1]]):.0f}°")
-        # Shift in optimal geometry
-        if r_grid[idx[0]] != r_grid[idx2[0]] or th_grid[idx[1]] != th_grid[idx2[1]]:
-            print("  → Vibronic modes shift the optimal geometry")
-        enhancement = (vib_grid[idx2] - ohm_grid[idx2]) / ohm_grid[idx2] * 100
-        print(f"  → Vibronic enhancement at vibronic optimum: {enhancement:+.1f}%")
+              f"r={r_vib[idx2[0]]:.1f} Å, θ={np.degrees(th_vib[idx2[1]]):.0f}°")
 
 
 def _ohm_reff_opt():
@@ -293,6 +316,8 @@ def _ohm_reff_opt():
 
 if __name__ == "__main__":
     import argparse
+    from gpu_utils import setup_gpu
+    setup_gpu()
 
     parser = argparse.ArgumentParser()
     parser.add_argument("--recompute", action="store_true",

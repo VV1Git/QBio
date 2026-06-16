@@ -22,6 +22,9 @@ def setup_gpu(verbose: bool = True) -> bool:
     """
     global _GPU_ACTIVE
     try:
+        import os
+        # Don't pre-allocate GPU memory — brmesolve (4×4) only peaks at ~70 MB.
+        os.environ.setdefault("XLA_PYTHON_CLIENT_PREALLOCATE", "false")
         import jax
         jax.config.update("jax_enable_x64", True)
 
@@ -31,7 +34,7 @@ def setup_gpu(verbose: bool = True) -> bool:
                 print("[GPU] JAX found no CUDA devices — falling back to CPU.")
             return False
 
-        import qutip_jax          # registers 'jax' and 'jaxdia' dtypes with QuTiP
+        import qutip_jax  # noqa: F401  — side-effect: registers 'jax' dtype with QuTiP
         import qutip as qt
         # 'jax' (dense) is safest across both mesolve and brmesolve
         qt.settings.core["default_dtype"] = "jax"
