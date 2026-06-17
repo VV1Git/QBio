@@ -5,13 +5,24 @@ Two intramolecular vibronic modes are explicitly quantised and coupled
 to specific sites of the 4-site Frenkel Hamiltonian.  The residual
 Ohmic bath drives electronic dephasing via Lindblad collapse operators.
 
-Mode parameters (Ai et al. / FMO literature):
-    Mode 1 : ω₁ = 726 cm⁻¹ coupled to site 1  (Huang-Rhys S₁ = 0.025)
-    Mode 2 : ω₂ = 243 cm⁻¹ coupled to site 3  (Huang-Rhys S₂ = 0.013)
-    g_k = ω_k × √S_k  →  g₁ ≈ 115 cm⁻¹,  g₂ ≈ 28 cm⁻¹
+Mode parameters — the two most strongly coupled intramolecular vibrations
+of bacteriochlorophyll a in the FMO complex, from the ΔFLN measurements of
+Rätsep & Freiberg, J. Lumin. 127, 251 (2007), Table 1:
+
+    Mode 1 : ω₁ = 770 cm⁻¹ coupled to site 1  (Huang-Rhys S₁ = 0.018, the
+                                                 strongest intramolecular mode)
+    Mode 2 : ω₂ = 243 cm⁻¹ coupled to site 3  (Huang-Rhys S₂ = 0.012)
+    g_k = ω_k × √S_k  →  g₁ ≈ 103 cm⁻¹,  g₂ ≈ 27 cm⁻¹
+
+The remaining ~60 weaker modes (ΣS_vib ≈ 0.31) plus the phonon continuum
+(S_ph ≈ 0.29, peak ≈ 22 cm⁻¹) are folded into the residual Ohmic bath that
+drives pure electronic dephasing.
 
 Hilbert-space ordering: electronic ⊗ mode-1 ⊗ mode-2
-    dims = [4, N_MAX+1, N_MAX+1] = [4, 4, 4]  →  64-dimensional
+    dims = [4, N_MAX+1, N_MAX+1] = [4, 5, 5]  →  100-dimensional
+
+N_MAX = 4 (5 Fock states/mode) converges P₄(∞) to <0.1 % and captures the
+thermal occupation of the 243 cm⁻¹ mode (n_th ≈ 0.45 at 300 K).
 """
 
 from __future__ import annotations
@@ -26,11 +37,11 @@ from spectral_density import LAMBDA_CM, GAMMA_CM, TEMPERATURE_K
 
 # ── Mode constants ─────────────────────────────────────────────────────────────
 
-OMEGA1_CM   = 726.0   # vibronic mode 1 frequency (cm⁻¹), site 1
-OMEGA2_CM   = 243.0   # vibronic mode 2 frequency (cm⁻¹), site 3
-S1          = 0.025   # Huang-Rhys factor, mode 1
-S2          = 0.013   # Huang-Rhys factor, mode 2
-N_MAX       = 3       # Fock truncation (keeps 0..N_MAX; each mode dim = N_MAX+1)
+OMEGA1_CM   = 770.0   # vibronic mode 1 frequency (cm⁻¹), site 1 — Rätsep 2007
+OMEGA2_CM   = 243.0   # vibronic mode 2 frequency (cm⁻¹), site 3 — Rätsep 2007
+S1          = 0.018   # Huang-Rhys factor, mode 1 (strongest intramolecular mode)
+S2          = 0.012   # Huang-Rhys factor, mode 2
+N_MAX       = 4       # Fock truncation (keeps 0..N_MAX; each mode dim = N_MAX+1)
 N_SITES     = 4
 N_MODES     = 2
 DIM_EL      = N_SITES
@@ -59,7 +70,7 @@ def _mode_ops(d: int) -> tuple[qt.Qobj, qt.Qobj, qt.Qobj]:
     return a, adag, N
 
 
-def build_vibronic_H(r: float, theta: float) -> qt.Qobj:
+def build_vibronic_H(r: float, theta: float, n_max: int = N_MAX) -> qt.Qobj:
     """
     Construct the full vibronic Hamiltonian in the tensor-product space.
 
@@ -74,21 +85,23 @@ def build_vibronic_H(r: float, theta: float) -> qt.Qobj:
     Parameters
     ----------
     r, theta : geometry (Å, radians)
+    n_max    : Fock truncation per mode (each mode dim = n_max+1)
 
     Returns
     -------
-    H : 64×64 QuTiP Qobj
+    H : QuTiP Qobj of dimension 4·(n_max+1)²
     """
+    dim_m = n_max + 1
     H_el_np = build_electronic_H(r, theta)
     H_el_np -= np.mean(SITE_ENERGIES_CM) * np.eye(N_SITES)
     H_el = qt.Qobj(H_el_np)
 
     I_el = _eye(DIM_EL)
-    I_m1 = _eye(DIM_M1)
-    I_m2 = _eye(DIM_M2)
+    I_m1 = _eye(dim_m)
+    I_m2 = _eye(dim_m)
 
-    a1, a1dag, N1 = _mode_ops(DIM_M1)
-    a2, a2dag, N2 = _mode_ops(DIM_M2)
+    a1, a1dag, N1 = _mode_ops(dim_m)
+    a2, a2dag, N2 = _mode_ops(dim_m)
 
     g1 = OMEGA1_CM * np.sqrt(S1)
     g2 = OMEGA2_CM * np.sqrt(S2)
@@ -110,7 +123,8 @@ def build_vibronic_H(r: float, theta: float) -> qt.Qobj:
 def _collapse_operators(temperature: float = TEMPERATURE_K,
                         lambda_: float = LAMBDA_CM,
                         gamma_bath: float = GAMMA_CM,
-                        gamma_vib: float = GAMMA_VIB_CM) -> list[qt.Qobj]:
+                        gamma_vib: float = GAMMA_VIB_CM,
+                        n_max: int = N_MAX) -> list[qt.Qobj]:
     """
     Build Lindblad collapse operators for vibrational damping + electronic dephasing.
 
@@ -123,11 +137,12 @@ def _collapse_operators(temperature: float = TEMPERATURE_K,
         γ_φ = 2 λ_res T / (hbar_kB γ_bath)
         λ_res = λ - S₁ω₁ - S₂ω₂   (reorganisation energy of residual bath)
     """
+    dim_m = n_max + 1
     I_el = _eye(DIM_EL)
-    I_m1 = _eye(DIM_M1)
-    I_m2 = _eye(DIM_M2)
-    a1, a1dag, _ = _mode_ops(DIM_M1)
-    a2, a2dag, _ = _mode_ops(DIM_M2)
+    I_m1 = _eye(dim_m)
+    I_m2 = _eye(dim_m)
+    a1, a1dag, _ = _mode_ops(dim_m)
+    a2, a2dag, _ = _mode_ops(dim_m)
 
     def n_th(omega: float) -> float:
         beta_omega = _HBAR_OVER_KB * omega / temperature
@@ -168,6 +183,7 @@ def run_structured(
     lambda_: float = LAMBDA_CM,
     gamma_bath: float = GAMMA_CM,
     gamma_vib: float = GAMMA_VIB_CM,
+    n_max: int = N_MAX,
 ) -> tuple[np.ndarray, list[qt.Qobj]]:
     """
     Propagate the vibronic Hamiltonian via Lindblad mesolve.
@@ -179,6 +195,9 @@ def run_structured(
     r, theta  : geometry (Å, radians)
     t_end     : propagation end time (fs)
     n_steps   : output time points
+    n_max     : Fock truncation per mode.  Default 4 (dim 100, P₄ converged
+                <0.1 %).  The Reff scans use n_max=3 (dim 64, <0.25 %, ~3×
+                faster) since the rate is insensitive to the truncation.
 
     Returns
     -------
@@ -186,16 +205,20 @@ def run_structured(
     """
     from gpu_utils import gpu_active
 
+    dim_full = DIM_EL * (n_max + 1) ** 2
+    n_m_sq   = (n_max + 1) ** 2
+
     # Build H and c_ops with CSR (sparse ops, avoids any dense matmul on GPU)
     _saved_dtype = qt.settings.core["default_dtype"]
     qt.settings.core["default_dtype"] = "CSR"
     try:
-        H     = build_vibronic_H(r, theta)
-        c_ops = _collapse_operators(temperature, lambda_, gamma_bath, gamma_vib)
+        H     = build_vibronic_H(r, theta, n_max=n_max)
+        c_ops = _collapse_operators(temperature, lambda_, gamma_bath, gamma_vib,
+                                    n_max=n_max)
         psi0  = qt.tensor(
             qt.basis(DIM_EL, 0),
-            qt.basis(DIM_M1, 0),
-            qt.basis(DIM_M2, 0),
+            qt.basis(n_max + 1, 0),
+            qt.basis(n_max + 1, 0),
         )
         rho0 = psi0 * psi0.dag()
     finally:
@@ -208,16 +231,16 @@ def run_structured(
         import jax.numpy as jnp
         import diffrax
 
-        # 64×64 JAX arrays (~64 KB each) — negligible GPU memory.
-        # Avoids the 4096×4096 dense Liouvillian (256 MB) and cuBLAS-lt autotuning.
+        # dim×dim JAX arrays (~80 KB each) — negligible GPU memory.
+        # Avoids the dim²×dim² dense Liouvillian and cuBLAS-lt autotuning.
         H_jax   = jnp.array(H.full())
-        c_jax   = jnp.array([c.full() for c in c_ops])       # (n_c, 64, 64)
+        c_jax   = jnp.array([c.full() for c in c_ops])
         cd_jax  = jnp.conj(c_jax).transpose(0, 2, 1)         # c†
         ctc_jax = jnp.einsum("kij,kjl->kil", cd_jax, c_jax)  # c†c per operator
 
         def _lindblad_rhs(t, y, args):
             H_, c_, cd_, ctc_ = args
-            rho = y.reshape(DIM_FULL, DIM_FULL)
+            rho = y.reshape(dim_full, dim_full)
             dr = -1j * (H_ @ rho - rho @ H_)
             # sum_k [c_k ρ c_k† − ½ c_k†c_k ρ − ½ ρ c_k†c_k]
             dr = dr + (
@@ -242,10 +265,9 @@ def run_structured(
                 args=(H_jax, c_jax, cd_jax, ctc_jax),
             )
 
-        ys = np.array(sol.ys)                        # (T, DIM_FULL²) complex
-        rhos_full = ys.reshape(-1, DIM_FULL, DIM_FULL)
-        # Batched ptrace over modes: rho_el[t,i,j] = Σ_m rho[t, 16i+m, 16j+m]
-        n_m_sq = DIM_M1 * DIM_M2
+        ys = np.array(sol.ys)                        # (T, dim_full²) complex
+        rhos_full = ys.reshape(-1, dim_full, dim_full)
+        # Batched ptrace over modes: rho_el[t,i,j] = Σ_m rho[t, i·n_m_sq+m, j·n_m_sq+m]
         rho_el_np = np.einsum(
             "tikjk->tij",
             rhos_full.reshape(-1, DIM_EL, n_m_sq, DIM_EL, n_m_sq),
@@ -253,7 +275,7 @@ def run_structured(
         rhos_el = [qt.Qobj(rho_el_np[t], dims=[[DIM_EL], [DIM_EL]])
                    for t in range(len(times_int))]
     else:
-        # CSR Liouvillian + scipy LSODA — fast (~2.5 s)
+        # CSR Liouvillian + scipy LSODA — runs on CPU (used by the parallel scans)
         L = qt.liouvillian(H, c_ops)
         result = qt.mesolve(
             L, rho0, times_int, c_ops=[],

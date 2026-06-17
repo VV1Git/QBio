@@ -38,8 +38,8 @@ RESULTS_DIR.mkdir(exist_ok=True)
 
 C_FS = 3e-5   # cm/fs
 
-# Mode frequencies for annotations
-OMEGA1_CM_ANNOT = 726.0
+# Mode frequencies for annotations (match vibronic.py: Rätsep 2007)
+OMEGA1_CM_ANNOT = 770.0
 OMEGA2_CM_ANNOT = 243.0
 
 
@@ -195,7 +195,7 @@ def figure4_coherence_spectra(
         ax.plot(freqs_cm[mask_f], power[mask_f], color=color, lw=1.5)
 
         # Annotate mode frequencies
-        for omega, name in [(OMEGA1_CM_ANNOT, "Mode 1\n726"), (OMEGA2_CM_ANNOT, "Mode 2\n243")]:
+        for omega, name in [(OMEGA1_CM_ANNOT, "Mode 1\n770"), (OMEGA2_CM_ANNOT, "Mode 2\n243")]:
             if omega <= 1000.0:
                 ax.axvline(omega, color="gray", ls=":", lw=1.0, alpha=0.6)
                 ax.text(omega + 8, 0.85, name, fontsize=7, color="gray")
@@ -242,7 +242,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
 
     t_end  = 2000.0  if args.quick else 5000.0
-    n_steps = 200    if args.quick else 400
+    n_steps = 300    if args.quick else 700
 
     run_3 = not args.fig4_only
     run_4 = not args.fig3_only

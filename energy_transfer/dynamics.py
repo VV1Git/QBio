@@ -186,7 +186,7 @@ def secular_reff(
 def run_ohmic_with_trap(
     r: float,
     theta: float,
-    kappa_trap_fs: float = 0.001,
+    kappa_trap_fs: float = 0.002,
     t_end: float = 15_000.0,
     n_steps: int = 500,
     lambda_: float = LAMBDA_CM,
@@ -202,7 +202,9 @@ def run_ohmic_with_trap(
 
     Parameters
     ----------
-    kappa_trap_fs : trapping rate at site 4 [fs⁻¹] (default 0.001 = 1 ps⁻¹)
+    kappa_trap_fs : trapping rate at site 4 [fs⁻¹] (default 0.002 = 2 ps⁻¹,
+                    the (0.5 ps)⁻¹ reaction-centre rate of Shabani et al.,
+                    Phys. Rev. E 89, 042706 (2014))
     t_end         : propagation window [fs]
     n_steps       : output time points
 
@@ -247,62 +249,6 @@ def run_ohmic_with_trap(
     Q  = np.array([float(rho[N_SITES,     N_SITES].real)     for rho in result.states])
 
     return times_fs, P4, Q
-
-
-def secular_with_trap(
-    r: float,
-    theta: float,
-    kappa_trap_fs: float = 0.002,
-    t_end: float = 10_000.0,
-    n_steps: int = 500,
-    lambda_: float = LAMBDA_CM,
-    gamma_bath: float = GAMMA_CM,
-    temperature: float = TEMPERATURE_K,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Secular Pauli propagation with irreversible trapping at site 4 (reaction centre).
-
-    Extends the Pauli rate matrix with a sink at site 4: each exciton α loses
-    population at rate w₄[α] × κ_trap.  The cumulative yield Q(t) rises 0 → 1,
-    reflecting the fraction of excitation irreversibly trapped by time t.
-
-    Parameters
-    ----------
-    kappa_trap_fs : trapping rate at site 4 in fs⁻¹  (default 0.002 = 2 ps⁻¹)
-    t_end         : propagation window [fs]
-    n_steps       : time-grid points
-
-    Returns
-    -------
-    times_fs  : (n_steps,) [fs]
-    P4_site   : (n_steps,) transient population at site 4 during dynamics
-    Q         : (n_steps,) cumulative trapping yield, 0 → 1
-    """
-    K, w4, P0 = _secular_setup(r, theta, lambda_, gamma_bath, temperature)
-
-    kappa_trap_cm = kappa_trap_fs / (2.0 * np.pi * C_FS)
-    K -= np.diag(w4 * kappa_trap_cm)   # add irreversible sink at site 4
-
-    t_max_int = t_end * 2.0 * np.pi * C_FS
-    times_int = np.linspace(0.0, t_max_int, n_steps)
-    times_fs  = times_int / (2.0 * np.pi * C_FS)
-
-    klam, kV = np.linalg.eig(K)
-    c_all = np.linalg.solve(kV, P0)
-
-    w4_kV = w4 @ kV
-    P4_site = np.real(
-        np.sum(
-            w4_kV[None, :] * c_all[None, :] * np.exp(klam[None, :] * times_int[:, None]),
-            axis=1,
-        )
-    ).clip(0.0, 1.0)
-
-    dt_fs = times_fs[1] - times_fs[0] if n_steps > 1 else 1.0
-    Q = np.cumsum(P4_site) * dt_fs * kappa_trap_fs
-    Q = np.clip(Q, 0.0, 1.0)
-
-    return times_fs, P4_site, Q
 
 
 if __name__ == "__main__":

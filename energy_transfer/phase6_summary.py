@@ -109,7 +109,10 @@ def _panel_heatmap(ax, fig, r_grid, theta_grid, reff_grid, title, cmap="viridis"
         abs_max = np.abs(reff_grid * 1e3).max()
         kwargs.update(vmin=-abs_max, vmax=abs_max)
     else:
-        kwargs.update(vmin=vmin or 0, vmax=vmax or reff_grid.max() * 1e3)
+        # 98th-percentile cap so the sub-100 fs resonance ridge does not
+        # saturate the scale and hide the slow-transfer gradient.
+        kwargs.update(vmin=vmin or 0,
+                      vmax=vmax or float(np.percentile(reff_grid * 1e3, 98)))
     img = ax.pcolormesh(theta_deg, r_grid, reff_grid * 1e3, **kwargs)
     cb  = fig.colorbar(img, ax=ax, pad=0.02)
     cb.set_label("Reff (ps⁻¹)", fontsize=8)
@@ -152,7 +155,7 @@ def _panel_coherence(ax, t_A, coh_A, t_B, coh_B,
     ax.plot(f_A[mask_f], p_A[mask_f], color="#1a6e8c", lw=1.5, label="Ohmic")
     mask_f2 = f_B <= 1000.0
     ax.plot(f_B[mask_f2], p_B[mask_f2], color="#d45f1e", lw=1.5, ls="--", label="Vibronic")
-    for omega, name in [(726, "726"), (243, "243")]:
+    for omega, name in [(770, "770"), (243, "243")]:
         ax.axvline(omega, color="gray", ls=":", lw=0.9, alpha=0.6)
         ax.text(omega + 8, 0.82, name, fontsize=7, color="gray")
     ax.set_xlabel("Frequency (cm⁻¹)", fontsize=9); ax.set_ylabel("Power (norm.)", fontsize=9)
@@ -212,13 +215,13 @@ def build_summary(recompute: bool = False) -> None:
 
     with tqdm(total=2, desc="Dynamics", unit="solve") as bar:
         bar.set_description("Ohmic (brmesolve)")
-        t_A, rhos_A = run_ohmic(r=11.3, theta=0.0, t_end=5000.0, n_steps=300)
+        t_A, rhos_A = run_ohmic(r=11.3, theta=0.0, t_end=5000.0, n_steps=600)
         P4_A = population(rhos_A, site=3)
         coh_A = _compute_coherence(rhos_A, 11.3, 0.0, is_vibronic=False)
         bar.update(1)
 
-        bar.set_description("Vibronic (CSR+scipy)")
-        t_B, rhos_el_B = run_structured(r=11.3, theta=0.0, t_end=5000.0, n_steps=300)
+        bar.set_description("Vibronic (GPU diffrax)")
+        t_B, rhos_el_B = run_structured(r=11.3, theta=0.0, t_end=5000.0, n_steps=600)
         P4_B = population_vibronic(rhos_el_B, site=3)
         coh_B = _compute_coherence(rhos_el_B, 11.3, 0.0, is_vibronic=True)
         bar.update(1)

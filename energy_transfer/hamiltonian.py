@@ -66,21 +66,15 @@ def _dipole_orientations(theta: float) -> np.ndarray:
     return np.tile(d_hat, (4, 1))
 
 
-def _kappa(d_hat_m: np.ndarray, d_hat_n: np.ndarray, r_vec: np.ndarray) -> float:
-    """Orientation factor κ_mn for point-dipole coupling."""
-    r_mag = np.linalg.norm(r_vec)
-    r_hat = r_vec / r_mag
-    return float(
-        np.dot(d_hat_m, d_hat_n)
-        - 3.0 * np.dot(d_hat_m, r_hat) * np.dot(d_hat_n, r_hat)
-    )
-
-
 # ── Main builder ──────────────────────────────────────────────────────────────
 
 def build_electronic_H(r: float, theta: float) -> np.ndarray:
     """
     Build the 4×4 Frenkel exciton Hamiltonian (cm⁻¹).
+
+    Fully vectorised: the point-dipole couplings J_ij and orientation
+    factors κ_ij are computed for all site pairs at once with numpy
+    broadcasting (no Python loop over pairs).
 
     Parameters
     ----------
@@ -91,20 +85,26 @@ def build_electronic_H(r: float, theta: float) -> np.ndarray:
     -------
     H : (4, 4) real symmetric ndarray in cm⁻¹
     """
-    positions = _site_positions(r)
-    dipoles   = _dipole_orientations(theta)
+    pos = _site_positions(r)             # (4, 3)
+    d   = _dipole_orientations(theta)    # (4, 3) unit vectors
 
-    H = np.diag(SITE_ENERGIES_CM.copy())
+    # Pairwise separation vectors and magnitudes
+    r_vec = pos[None, :, :] - pos[:, None, :]          # (4, 4, 3): r_vec[i,j] = pos_j − pos_i
+    r_mag = np.linalg.norm(r_vec, axis=-1)             # (4, 4)
+    np.fill_diagonal(r_mag, np.inf)                    # avoid 0-division on diagonal
+    r_hat = r_vec / r_mag[..., None]
 
-    for i in range(4):
-        for j in range(i + 1, 4):
-            r_vec = positions[j] - positions[i]
-            r_mag = np.linalg.norm(r_vec)
-            kappa = _kappa(dipoles[i], dipoles[j], r_vec)
-            J = _C_DD * kappa / r_mag ** 3
-            H[i, j] = J
-            H[j, i] = J
+    # Orientation factor κ_ij = d̂_i·d̂_j − 3 (d̂_i·r̂_ij)(d̂_j·r̂_ij).
+    # Both projections use the SAME separation direction r̂_ij, so the second
+    # factor is d̂_j·r̂_ij (einsum over j's dipole), NOT d_rhat.T (which would
+    # use r̂_ji = −r̂_ij and flip the sign).
+    dd     = d @ d.T                                    # (4, 4): d̂_i·d̂_j
+    d_rh_i = np.einsum("ik,ijk->ij", d, r_hat)          # (4, 4): d̂_i·r̂_ij
+    d_rh_j = np.einsum("jk,ijk->ij", d, r_hat)          # (4, 4): d̂_j·r̂_ij
+    kappa  = dd - 3.0 * d_rh_i * d_rh_j
 
+    J = _C_DD * kappa / r_mag ** 3                     # (4, 4); diagonal → 0 (r_mag=∞)
+    H = np.diag(SITE_ENERGIES_CM.astype(float)) + J
     return H
 
 

@@ -25,8 +25,6 @@ from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.ticker as ticker
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers 3D projection)
 from joblib import Parallel, delayed
 from tqdm import tqdm
 
@@ -63,7 +61,7 @@ def unit_check() -> None:
 def reproduce_figure1(
     t_end: float = 15_000.0,
     n_steps: int = 500,
-    kappa_trap_fs: float = 0.001,
+    kappa_trap_fs: float = 0.002,
 ) -> None:
     """
     Plot reaction-centre trapping yield Q(t) for three geometries at θ=0.
@@ -183,44 +181,39 @@ def reproduce_figure2a(
     idx_max   = np.unravel_index(np.argmax(Reff_grid), Reff_grid.shape)
     r_opt, th_opt = r_grid[idx_max[0]], theta_grid[idx_max[1]]
 
-    # ── Combined 2-D heatmap + 3-D surface ──────────────────────────────────
-    fig = plt.figure(figsize=(14, 5.5), dpi=150)
+    # ── 2-D heatmap with contour overlay ────────────────────────────────────
+    fig, ax2d = plt.subplots(figsize=(8, 6), dpi=150)
     fig.patch.set_facecolor("#f7f2ea")
-
-    # Left: 2-D heatmap
-    ax2d = fig.add_subplot(1, 2, 1)
     ax2d.set_facecolor("#fffdf7")
+
+    # The resonance ridge (exciton gap ≈ bath peak) reaches the sub-100 fs
+    # regime where Redfield breaks down; cap the colour scale at the 98th
+    # percentile so the physically-meaningful gradient stays visible.
+    vmax = float(np.percentile(Reff_grid * 1e3, 98))
     img = ax2d.pcolormesh(
         theta_deg, r_grid, Reff_grid * 1e3,
-        cmap="viridis", shading="auto",
+        cmap="viridis", shading="gouraud", vmin=0.0, vmax=vmax,
     )
-    cb = fig.colorbar(img, ax=ax2d)
-    cb.set_label("Reff (ps⁻¹)", fontsize=10)
-    ax2d.plot(np.degrees(th_opt), r_opt, "w*", markersize=12,
-              label=f"max: r={r_opt:.1f} Å, θ={np.degrees(th_opt):.0f}°")
-    ax2d.legend(frameon=False, fontsize=9, loc="upper right")
-    ax2d.set_xlabel("Dipole angle θ (°)", fontsize=11)
-    ax2d.set_ylabel("Intra-dimer distance r (Å)", fontsize=11)
-    ax2d.set_title("2-D heatmap", fontsize=10)
+    cb = fig.colorbar(img, ax=ax2d, extend="max")
+    cb.set_label("Reff (ps⁻¹)", fontsize=11)
 
-    # Right: 3-D surface
-    ax3d = fig.add_subplot(1, 2, 2, projection="3d")
-    T_deg, R_mesh = np.meshgrid(theta_deg, r_grid)
-    surf = ax3d.plot_surface(
-        T_deg, R_mesh, Reff_grid * 1e3,
-        cmap="viridis", linewidth=0, antialiased=True, alpha=0.93,
-    )
-    fig.colorbar(surf, ax=ax3d, shrink=0.55, pad=0.08).set_label("Reff (ps⁻¹)", fontsize=9)
-    ax3d.set_xlabel("θ (°)", labelpad=6, fontsize=9)
-    ax3d.set_ylabel("r (Å)", labelpad=6, fontsize=9)
-    ax3d.set_zlabel("Reff (ps⁻¹)", labelpad=6, fontsize=9)
-    ax3d.set_title("3-D heightmap", fontsize=10)
-    ax3d.view_init(elev=30, azim=225)
+    # Contour lines for quantitative read-off
+    cs = ax2d.contour(theta_deg, r_grid, Reff_grid * 1e3,
+                      levels=8, colors="white", linewidths=0.6, alpha=0.5)
+    ax2d.clabel(cs, inline=True, fontsize=7, fmt="%.1f")
+
+    ax2d.plot(np.degrees(th_opt), r_opt, "*", color="#ff3b3b", markersize=18,
+              markeredgecolor="white", markeredgewidth=0.8,
+              label=f"max: r={r_opt:.1f} Å, θ={np.degrees(th_opt):.0f}°")
+    ax2d.legend(frameon=False, fontsize=10, loc="upper right",
+                labelcolor="white")
+    ax2d.set_xlabel("Dipole angle θ (°)", fontsize=12)
+    ax2d.set_ylabel("Intra-dimer distance r (Å)", fontsize=12)
 
     fig.suptitle(
         f"Fig. 2a: Reff(r, θ) — secular Redfield  "
         f"({len(r_grid)}×{len(theta_grid)} grid)",
-        fontsize=12,
+        fontsize=13,
     )
     fig.tight_layout()
     out = RESULTS_DIR / "fig2a_reff_heatmap.png"
@@ -259,23 +252,24 @@ if __name__ == "__main__":
 
     t_end_1  = 8_000.0   if args.quick else 15_000.0
     t_end_2  = 50_000.0  if args.quick else 200_000.0
-    r_pts    = 12         if args.quick else 50
-    th_pts   = 8          if args.quick else 30
+    # Secular Redfield is ~ms/point and embarrassingly parallel → very fine grid.
+    r_pts    = 16         if args.quick else 120
+    th_pts   = 10         if args.quick else 80
 
     if run_fig1:
         print("\n=== Figure 1: trapping yield Q(t) ===")
         reproduce_figure1(
             t_end=t_end_1,
-            n_steps=250 if args.quick else 500,
+            n_steps=300 if args.quick else 600,
         )
 
     if run_fig2:
-        print("\n=== Figure 2a: Reff heatmap + 3-D surface ===")
+        print("\n=== Figure 2a: Reff heatmap ===")
         reproduce_figure2a(
             r_grid=np.linspace(8.0, 14.0, r_pts),
             theta_grid=np.linspace(0.0, np.pi / 2, th_pts),
             t_end=t_end_2,
-            n_steps=200 if args.quick else 300,
+            n_steps=300 if args.quick else 500,
         )
 
     print("\nDone.")

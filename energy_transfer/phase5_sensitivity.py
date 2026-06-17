@@ -24,7 +24,6 @@ from __future__ import annotations
 
 import sys
 import warnings
-import time
 from pathlib import Path
 
 import numpy as np
@@ -47,7 +46,7 @@ THETA_OPT = 0.0    # rad
 
 # ── Grid defaults ──────────────────────────────────────────────────────────────
 
-N_FULL  = 18
+N_FULL  = 30
 N_QUICK = 9
 
 LAMBDA_RANGE = (5.0,  150.0)
@@ -75,7 +74,7 @@ def _vib(r, th, lambda_, gamma_bath, temperature, t_end=5000.0, n_steps=300):
     try:
         _, _, reff = vibronic_reff(r, th, t_end=t_end, n_steps=n_steps,
                                    lambda_=lambda_, gamma_bath=gamma_bath,
-                                   temperature=temperature)
+                                   temperature=temperature, n_max=3)
         return reff
     except Exception:
         return 0.0

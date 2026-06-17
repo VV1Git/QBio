@@ -4,3 +4,4 @@
 #   pip install -r requirements-gpu.txt
 jax[cuda12]
 qutip-jax
+diffrax        # JAX ODE integrator for the GPU vibronic Lindblad solver

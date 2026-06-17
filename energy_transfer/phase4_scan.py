@@ -1,12 +1,12 @@
 """
 Phase 4: Production Reff(r, θ) scan — Ohmic vs vibronic, higher resolution.
 
-Produces two output figures:
+Produces one output figure:
     fig5_reff_comparison.png  — three 2-D heatmap panels (Ohmic | Vibronic | ΔReff)
-    fig5_reff_3d.png          — three 3-D surface heightmaps (same data)
 
-Grid: 50 r-values × 30 θ-values for Ohmic (1 500 points, seconds total).
-      30 r-values × 20 θ-values for Vibronic (600 points, parallelised).
+Grid: 120 r-values × 80 θ-values for Ohmic (secular Redfield, ms/point).
+      40 r-values × 28 θ-values for Vibronic (Lindblad mesolve, parallelised
+      across all CPU cores via joblib).
 The ΔReff difference panel uses the vibronic grid interpolated to the ohmic grid.
 
 Usage
@@ -19,14 +19,11 @@ Usage
 from __future__ import annotations
 
 import sys
-import time
 import warnings
 from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.colors as mcolors
-from mpl_toolkits.mplot3d import Axes3D  # noqa: F401  (registers 3D projection)
 from joblib import Parallel, delayed
 from tqdm import tqdm
 
@@ -42,18 +39,21 @@ RESULTS_DIR.mkdir(exist_ok=True)
 
 # ── Grid defaults ──────────────────────────────────────────────────────────────
 
-# Ohmic (secular solver — microseconds per point, can be very fine)
-R_GRID_OHM_FULL     = np.linspace(7.0, 15.0, 50)
-THETA_GRID_OHM_FULL = np.linspace(0.0, np.pi / 2, 30)
+# Distance range r ∈ [8, 14] Å — physical BChl Mg–Mg separations (closer than
+# ~8 Å is below van der Waals contact and pushes secular Redfield out of its
+# weak-coupling validity range).
+# Ohmic (secular solver — ms per point, embarrassingly parallel → very fine)
+R_GRID_OHM_FULL     = np.linspace(8.0, 14.0, 120)
+THETA_GRID_OHM_FULL = np.linspace(0.0, np.pi / 2, 80)
 
-R_GRID_OHM_QUICK     = np.linspace(7.0, 15.0, 12)
-THETA_GRID_OHM_QUICK = np.linspace(0.0, np.pi / 2, 8)
+R_GRID_OHM_QUICK     = np.linspace(8.0, 14.0, 16)
+THETA_GRID_OHM_QUICK = np.linspace(0.0, np.pi / 2, 10)
 
-# Vibronic (Lindblad mesolve — ~2 s/point; keep to ~600 points max)
-R_GRID_VIB_FULL     = np.linspace(7.0, 15.0, 30)
-THETA_GRID_VIB_FULL = np.linspace(0.0, np.pi / 2, 20)
+# Vibronic (Lindblad mesolve — ~10 s/point on 1 core; 24-core joblib parallel)
+R_GRID_VIB_FULL     = np.linspace(8.0, 14.0, 32)
+THETA_GRID_VIB_FULL = np.linspace(0.0, np.pi / 2, 22)
 
-R_GRID_VIB_QUICK     = np.linspace(7.0, 15.0, 10)
+R_GRID_VIB_QUICK     = np.linspace(8.0, 14.0, 10)
 THETA_GRID_VIB_QUICK = np.linspace(0.0, np.pi / 2, 6)
 
 
@@ -69,7 +69,8 @@ def _ohmic_point(r, theta):
 
 def _vibronic_point(r, theta, t_end, n_steps):
     try:
-        _, _, reff = vibronic_reff(r, theta, t_end=t_end, n_steps=n_steps)
+        # n_max=3 (dim 64): Reff is insensitive to Fock depth (<0.25 %), ~3× faster
+        _, _, reff = vibronic_reff(r, theta, t_end=t_end, n_steps=n_steps, n_max=3)
         return reff
     except Exception:
         return 0.0
@@ -129,10 +130,12 @@ def plot_comparison_2d(
     fig.patch.set_facecolor("#f7f2ea")
 
     ax = axes[0]
-    vmax = ohmic_grid.max() * 1e3
+    # Cap at the 98th percentile: the sub-100 fs resonance ridge (Redfield
+    # breakdown regime) would otherwise saturate the scale and hide the gradient.
+    vmax = float(np.percentile(ohmic_grid * 1e3, 98))
     img = ax.pcolormesh(theta_deg_ohm, r_ohm, ohmic_grid * 1e3,
                         cmap="viridis", shading="auto", vmin=0, vmax=vmax)
-    fig.colorbar(img, ax=ax).set_label("Reff (ps⁻¹)", fontsize=9)
+    fig.colorbar(img, ax=ax, extend="max").set_label("Reff (ps⁻¹)", fontsize=9)
     _add_star(ax, r_ohm, theta_ohm, ohmic_grid)
     ax.set_title("Ohmic (secular Redfield)", fontsize=10)
     ax.set_xlabel("Dipole angle θ (°)")
@@ -182,53 +185,6 @@ def plot_comparison_2d(
     fig.suptitle(f"Fig. 5: Production Reff(r,θ) scan{tag}", fontsize=11)
     fig.tight_layout()
     out = RESULTS_DIR / "fig5_reff_comparison.png"
-    fig.savefig(out, bbox_inches="tight")
-    print(f"  Saved {out}")
-
-
-# ── 3-D heightmap figure ───────────────────────────────────────────────────────
-
-def plot_comparison_3d(
-    r_ohm: np.ndarray,
-    theta_ohm: np.ndarray,
-    ohmic_grid: np.ndarray,
-    r_vib: np.ndarray | None,
-    theta_vib: np.ndarray | None,
-    vibronic_grid: np.ndarray | None,
-    tag: str = "",
-) -> None:
-    """3-D surface heightmaps: Ohmic and (if available) Vibronic side-by-side."""
-    n_panels = 2 if vibronic_grid is not None else 1
-    fig = plt.figure(figsize=(7 * n_panels, 6), dpi=150)
-    fig.patch.set_facecolor("#f7f2ea")
-
-    T_ohm, R_ohm = np.meshgrid(np.degrees(theta_ohm), r_ohm)
-
-    ax1 = fig.add_subplot(1, n_panels, 1, projection="3d")
-    surf1 = ax1.plot_surface(T_ohm, R_ohm, ohmic_grid * 1e3,
-                              cmap="viridis", linewidth=0, antialiased=True, alpha=0.93)
-    fig.colorbar(surf1, ax=ax1, shrink=0.5, pad=0.08).set_label("Reff (ps⁻¹)", fontsize=8)
-    ax1.set_xlabel("θ (°)", labelpad=6, fontsize=9)
-    ax1.set_ylabel("r (Å)", labelpad=6, fontsize=9)
-    ax1.set_zlabel("Reff (ps⁻¹)", labelpad=6, fontsize=9)
-    ax1.set_title("Ohmic (secular Redfield)", fontsize=10)
-    ax1.view_init(elev=30, azim=225)
-
-    if vibronic_grid is not None:
-        T_vib, R_vib = np.meshgrid(np.degrees(theta_vib), r_vib)
-        ax2 = fig.add_subplot(1, n_panels, 2, projection="3d")
-        surf2 = ax2.plot_surface(T_vib, R_vib, vibronic_grid * 1e3,
-                                  cmap="viridis", linewidth=0, antialiased=True, alpha=0.93)
-        fig.colorbar(surf2, ax=ax2, shrink=0.5, pad=0.08).set_label("Reff (ps⁻¹)", fontsize=8)
-        ax2.set_xlabel("θ (°)", labelpad=6, fontsize=9)
-        ax2.set_ylabel("r (Å)", labelpad=6, fontsize=9)
-        ax2.set_zlabel("Reff (ps⁻¹)", labelpad=6, fontsize=9)
-        ax2.set_title("Vibronic (Lindblad)", fontsize=10)
-        ax2.view_init(elev=30, azim=225)
-
-    fig.suptitle(f"Fig. 5: 3-D Reff(r,θ) surface{tag}", fontsize=11)
-    fig.tight_layout()
-    out = RESULTS_DIR / "fig5_reff_3d.png"
     fig.savefig(out, bbox_inches="tight")
     print(f"  Saved {out}")
 
@@ -285,10 +241,6 @@ if __name__ == "__main__":
 
     print("\nGenerating 2-D heatmaps …")
     plot_comparison_2d(r_ohm, theta_ohm, ohmic_grid,
-                       r_vib_used, theta_vib_used, vibronic_grid, tag=tag)
-
-    print("Generating 3-D heightmaps …")
-    plot_comparison_3d(r_ohm, theta_ohm, ohmic_grid,
                        r_vib_used, theta_vib_used, vibronic_grid, tag=tag)
 
     print("\nDone.")
