@@ -1,14 +1,23 @@
 """
-Open-quantum-system dynamics for the 4-site energy-transfer model.
+Open-quantum-system dynamics and trapping efficiency for the 8-site FMO model.
 
-Uses QuTiP's Bloch-Redfield solver (brmesolve) with the Ohmic/Drude
-spectral density as a proxy for the CMRT used in Ai et al.  Agreement
-is expected to be qualitative rather than exact.
+Two layers:
 
-Each site couples *diagonally* (dephasing-type) to its own independent
-Ohmic bath:   H_SB = Σ_i  |i⟩⟨i| ⊗ B_i
+* compute_ete()  — FAST secular-Redfield excitation-transfer-efficiency (ETE)
+  and mean trapping time, via a single linear solve on the 8x8 exciton-
+  population rate matrix plus reaction-centre trapping and exciton loss.
+  This is the workhorse for the position scans (thousands of geometries).
 
-Initial state: full excitation on site 1  (ρ₀ = |1⟩⟨1|).
+* run_with_trap() / run_ohmic() — full Lindblad/Bloch-Redfield trajectories on
+  the 8 sites (+ trap + ground states) for the showcase figures.
+
+Physics / parameters (all literature-grounded; see fmo_data.py):
+    * Ohmic/Drude bath, lambda = 35, gamma = 53 cm^-1, T = 300 K
+      (Ishizaki-Fleming; Shabani et al. 2014).
+    * Reaction-centre trapping at BChl 3, k_trap = (0.5 ps)^-1 = 2 ps^-1.
+    * Excitation loss everywhere, k_loss = (1 ns)^-1.
+    * Initial excitation at the antenna-facing pigments BChl 1 and BChl 6.
+      (all Shabani, Mohseni, Rabitz & Lloyd, Phys. Rev. E 89, 042706 (2014))
 """
 
 from __future__ import annotations
@@ -16,114 +25,180 @@ from __future__ import annotations
 import numpy as np
 import qutip as qt
 
-from hamiltonian import build_electronic_H, SITE_ENERGIES_CM
+from hamiltonian import build_electronic_H
+from fmo_data import SITE_ENERGIES_CM, N_SITES, TRAP_SITE, ENTRY_SITES
 from spectral_density import gamma_Ohmic, LAMBDA_CM, GAMMA_CM, TEMPERATURE_K
 
-
-N_SITES = 4
-# t_internal = t_fs × 2π × C_FS  makes H × t_internal dimensionless (H in cm⁻¹)
+# t_internal = t_fs * 2*pi*C_FS makes H * t_internal dimensionless (H in cm^-1)
 C_FS = 3e-5  # speed of light in cm/fs
 
+# Trapping and loss rates (converted fs^-1 -> cm^-1 via /(2*pi*C_FS))
+K_TRAP_FS = 0.002      # (0.5 ps)^-1 = 2 ps^-1   reaction-centre trapping
+K_LOSS_FS = 1.0e-6     # (1 ns)^-1               excitation loss
 
-def _basis_projectors() -> list[qt.Qobj]:
-    """Return |i⟩⟨i| projectors for i = 0..3 as QuTiP Qobjs."""
-    return [qt.ket2dm(qt.basis(N_SITES, i)) for i in range(N_SITES)]
+def _fs_to_cm(rate_fs: float) -> float:
+    return rate_fs / (2.0 * np.pi * C_FS)
 
 
-def _make_spectral_fn(lambda_: float, gamma_bath: float, temperature: float):
-    """Return a spectral function closure for brmesolve a_ops."""
+# ── Fast ETE via the secular (Pauli) exciton rate matrix ──────────────────────
+
+def _redfield_rate_matrix(H: np.ndarray,
+                          lambda_: float, gamma_bath: float, temperature: float
+                          ) -> tuple[np.ndarray, np.ndarray]:
+    """
+    Secular-Redfield inter-exciton population rate matrix K (cm^-1) and the
+    eigenvector matrix U (columns = excitons in the site basis).
+
+        Gamma_{a->b} = [sum_i (U[i,a] U[i,b])^2] * gamma(E_a - E_b)
+        K[b,a] = Gamma_{a->b}   (gain),   K[a,a] = -sum_b Gamma_{a->b}
+    """
+    H = H - np.mean(SITE_ENERGIES_CM) * np.eye(N_SITES)   # reduce stiffness
+    eigvals, U = np.linalg.eigh(H)
+
+    F = (U ** 2).T @ (U ** 2)                              # overlap F[a,b]
+    omega = eigvals[:, None] - eigvals[None, :]           # E_a - E_b
+    g = gamma_Ohmic(omega, lambda_=lambda_, gamma=gamma_bath, temperature=temperature)
+    np.fill_diagonal(g, 0.0)
+    Gamma = F * g                                          # rate a->b
+    K = Gamma.T.copy()
+    np.fill_diagonal(K, -Gamma.sum(axis=1))
+    return K, U
+
+
+def compute_ete(H: np.ndarray,
+                initial_sites: tuple[int, ...] = ENTRY_SITES,
+                trap_site: int = TRAP_SITE,
+                k_trap_fs: float = K_TRAP_FS,
+                k_loss_fs: float = K_LOSS_FS,
+                lambda_: float = LAMBDA_CM,
+                gamma_bath: float = GAMMA_CM,
+                temperature: float = TEMPERATURE_K) -> tuple[float, float]:
+    """
+    Excitation-transfer efficiency (trapping yield) and mean trapping time.
+
+    Populations evolve as dP/dt = K_tot P in the exciton basis, where
+        K_tot = K_redfield - k_loss I - diag(k_trap |U[trap, a]|^2).
+    Trapping yield and mean time follow from moments of P(t):
+        integral_0^inf P dt   = -K_tot^{-1} P0
+        integral_0^inf t P dt =  K_tot^{-2} P0
+        ETE = k_trap * sum_a |U[trap,a]|^2 (integral P dt)_a
+        tau = (sum_a w_a integral t P dt) / (sum_a w_a integral P dt)
+
+    Averaged over the requested initial entry pigments.
+
+    Returns
+    -------
+    ete : trapping yield in [0, 1]
+    tau_fs : mean trapping time (fs)
+    """
+    K, U = _redfield_rate_matrix(H, lambda_, gamma_bath, temperature)
+
+    k_trap = _fs_to_cm(k_trap_fs)
+    k_loss = _fs_to_cm(k_loss_fs)
+
+    w_trap = k_trap * U[trap_site, :] ** 2                 # trapping weight per exciton
+    K_tot = K - k_loss * np.eye(N_SITES) - np.diag(w_trap)
+
+    etes, taus = [], []
+    for s in initial_sites:
+        P0 = U[s, :] ** 2                                  # localized site -> exciton pops
+        m1 = np.linalg.solve(K_tot, P0)                    # K^{-1} P0
+        int_P = -m1                                        # integral P dt   (>= 0)
+        m2 = np.linalg.solve(K_tot, m1)                    # K^{-2} P0
+        int_tP = m2                                        # integral t P dt
+        yield_ = float(w_trap @ int_P)
+        etes.append(yield_)
+        denom = w_trap @ int_P
+        tau_int = (w_trap @ int_tP) / denom if denom > 0 else np.inf
+        taus.append(tau_int / (2.0 * np.pi * C_FS))        # internal -> fs
+    return float(np.mean(etes)), float(np.mean(taus))
+
+
+# ── Full trajectories (showcase figures) ──────────────────────────────────────
+
+def _basis_projectors(dim: int, n: int) -> list[qt.Qobj]:
+    return [qt.ket2dm(qt.basis(dim, i)) for i in range(n)]
+
+
+def _spectral_fn(lambda_, gamma_bath, temperature):
     def _fn(omega):
         return gamma_Ohmic(omega, lambda_=lambda_, gamma=gamma_bath, temperature=temperature)
     return _fn
 
 
-def _secular_setup(
-    r: float,
-    theta: float,
-    lambda_: float,
-    gamma_bath: float,
-    temperature: float,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+def run_ohmic(displacements: np.ndarray | None = None,
+              initial_site: int = ENTRY_SITES[0],
+              t_end: float = 5000.0, n_steps: int = 500,
+              lambda_: float = LAMBDA_CM, gamma_bath: float = GAMMA_CM,
+              temperature: float = TEMPERATURE_K) -> tuple[np.ndarray, list[qt.Qobj]]:
     """
-    Build the Pauli rate matrix K for secular Redfield propagation.
-
-    Vectorised: the full N×N off-diagonal rate matrix is computed in one
-    numpy call rather than a Python double loop.
-
-    Returns
-    -------
-    K  : (N_SITES, N_SITES) Pauli rate matrix  dP/dt = K P
-    w4 : (N_SITES,) weight of site 4 in each exciton  |⟨site4|α⟩|²
-    P0 : (N_SITES,) initial exciton populations  |⟨α|site1⟩|²
+    Bloch-Redfield dynamics on the 8 sites (no trap) — used for coherence
+    analysis.  Each site couples diagonally to its own Ohmic bath.
     """
-    H_np = build_electronic_H(r, theta)
-    H_np -= np.mean(SITE_ENERGIES_CM) * np.eye(N_SITES)
-    eigvals, U = np.linalg.eigh(H_np)
-
-    F = (U ** 2).T @ (U ** 2)          # Förster overlap: F[α,β] = Σᵢ U[i,α]² U[i,β]²
-
-    omega_matrix = eigvals[:, None] - eigvals[None, :]   # (N, N), ω[α,β] = Eα − Eβ
-    gamma_matrix = gamma_Ohmic(omega_matrix, lambda_=lambda_, gamma=gamma_bath,
-                               temperature=temperature)
-    np.fill_diagonal(gamma_matrix, 0.0)                  # no self-transition
-    Gamma = F * gamma_matrix                             # Gamma[α,β] = rate FROM α TO β
-
-    K = Gamma.T.copy()                                   # K[β,α] = gain into β from α
-    np.fill_diagonal(K, -Gamma.sum(axis=1))              # total loss from α
-
-    w4 = U[3, :] ** 2   # |⟨site4|α⟩|²
-    P0 = U[0, :] ** 2   # initial exciton pops (excitation on site 1)
-    return K, w4, P0
-
-
-def run_ohmic(
-    r: float,
-    theta: float,
-    t_end: float = 5000.0,
-    n_steps: int = 500,
-    lambda_: float = LAMBDA_CM,
-    gamma_bath: float = GAMMA_CM,
-    temperature: float = TEMPERATURE_K,
-) -> tuple[np.ndarray, list[qt.Qobj]]:
-    """
-    Propagate the 4-site Frenkel Hamiltonian under an Ohmic bath.
-
-    Parameters
-    ----------
-    r          : intra-dimer distance (Å)
-    theta      : dipole angle (radians)
-    t_end      : propagation end time (fs)
-    n_steps    : number of output time points
-    lambda_    : bath reorganisation energy (cm⁻¹)
-    gamma_bath : Drude cut-off (cm⁻¹)
-    temperature: bath temperature (K)
-
-    Returns
-    -------
-    times : (n_steps,) array  [fs]
-    rhos  : list of n_steps density matrices (QuTiP Qobj)
-    """
-    t_max_int = t_end * 2.0 * np.pi * C_FS
-    times_int = np.linspace(0.0, t_max_int, n_steps)
-
-    H_np = build_electronic_H(r, theta)
+    H_np = build_electronic_H(displacements)
     H_np -= np.mean(SITE_ENERGIES_CM) * np.eye(N_SITES)
     H = qt.Qobj(H_np)
 
-    spectral_fn = _make_spectral_fn(lambda_, gamma_bath, temperature)
-    a_ops = [(proj, spectral_fn) for proj in _basis_projectors()]
+    a_ops = [(proj, _spectral_fn(lambda_, gamma_bath, temperature))
+             for proj in _basis_projectors(N_SITES, N_SITES)]
+    rho0 = qt.ket2dm(qt.basis(N_SITES, initial_site))
 
-    rho0 = qt.basis(N_SITES, 0) * qt.basis(N_SITES, 0).dag()
+    t_max_int = t_end * 2.0 * np.pi * C_FS
+    times_int = np.linspace(0.0, t_max_int, n_steps)
+    result = qt.brmesolve(H, rho0, times_int, a_ops=a_ops, sec_cutoff=0.1,
+                          options={"nsteps": 100000, "rtol": 1e-8, "atol": 1e-10,
+                                   "method": "adams"})
+    return times_int / (2.0 * np.pi * C_FS), result.states
 
-    result = qt.brmesolve(
-        H, rho0, times_int,
-        a_ops=a_ops,
-        sec_cutoff=0.1,
-        options={"nsteps": 100000, "rtol": 1e-8, "atol": 1e-10, "method": "adams"},
-    )
 
-    times_fs = times_int / (2.0 * np.pi * C_FS)
-    return times_fs, result.states
+def run_with_trap(displacements: np.ndarray | None = None,
+                  initial_site: int = ENTRY_SITES[0],
+                  trap_site: int = TRAP_SITE,
+                  k_trap_fs: float = K_TRAP_FS, k_loss_fs: float = K_LOSS_FS,
+                  t_end: float = 15000.0, n_steps: int = 500,
+                  lambda_: float = LAMBDA_CM, gamma_bath: float = GAMMA_CM,
+                  temperature: float = TEMPERATURE_K
+                  ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """
+    Full trajectory on 8 sites + reaction-centre trap + ground (loss) state.
+
+    Returns
+    -------
+    times_fs, P_sites (n_steps, 8), Q (trap population), L (lost population)
+    """
+    dim = N_SITES + 2
+    i_trap, i_ground = N_SITES, N_SITES + 1
+
+    H_np = build_electronic_H(displacements)
+    H_np -= np.mean(SITE_ENERGIES_CM) * np.eye(N_SITES)
+    H_big = np.zeros((dim, dim))
+    H_big[:N_SITES, :N_SITES] = H_np
+    H = qt.Qobj(H_big)
+
+    a_ops = [(qt.ket2dm(qt.basis(dim, i)), _spectral_fn(lambda_, gamma_bath, temperature))
+             for i in range(N_SITES)]
+
+    c_ops = []
+    k_trap = _fs_to_cm(k_trap_fs)
+    c_tr = np.zeros((dim, dim)); c_tr[i_trap, trap_site] = np.sqrt(k_trap)
+    c_ops.append(qt.Qobj(c_tr))
+    k_loss = _fs_to_cm(k_loss_fs)
+    for i in range(N_SITES):
+        c_l = np.zeros((dim, dim)); c_l[i_ground, i] = np.sqrt(k_loss)
+        c_ops.append(qt.Qobj(c_l))
+
+    rho0 = qt.ket2dm(qt.basis(dim, initial_site))
+    t_max_int = t_end * 2.0 * np.pi * C_FS
+    times_int = np.linspace(0.0, t_max_int, n_steps)
+    result = qt.brmesolve(H, rho0, times_int, a_ops=a_ops, c_ops=c_ops, sec_cutoff=0.1,
+                          options={"nsteps": 100000, "rtol": 1e-8, "atol": 1e-10,
+                                   "method": "adams"})
+
+    states = result.states
+    P_sites = np.array([[float(rho[i, i].real) for i in range(N_SITES)] for rho in states])
+    Q = np.array([float(rho[i_trap, i_trap].real) for rho in states])
+    L = np.array([float(rho[i_ground, i_ground].real) for rho in states])
+    return times_int / (2.0 * np.pi * C_FS), P_sites, Q, L
 
 
 def population(rhos: list[qt.Qobj], site: int) -> np.ndarray:
@@ -131,136 +206,10 @@ def population(rhos: list[qt.Qobj], site: int) -> np.ndarray:
     return np.array([float(rho[site, site].real) for rho in rhos])
 
 
-# ── Secular Redfield rate matrix ──────────────────────────────────────────────
-
-def secular_reff(
-    r: float,
-    theta: float,
-    t_end: float = 200_000.0,
-    n_steps: int = 400,
-    lambda_: float = LAMBDA_CM,
-    gamma_bath: float = GAMMA_CM,
-    temperature: float = TEMPERATURE_K,
-) -> tuple[np.ndarray, np.ndarray, float]:
-    """
-    Compute Reff via the secular (Pauli) master equation — no ODE integration.
-
-    In the secular approximation populations decouple from coherences and
-    evolve under a classical rate matrix K built directly from the Redfield
-    decay rates Γ_{α→β}:
-
-        Γ_{α→β} = [Σᵢ (U[i,α] U[i,β])²] × γ(Eα − Eβ)
-
-    K is 4×4, diagonalised analytically, and P₄(t) is computed as a sum of
-    four real exponentials — microseconds per geometry point.
-
-    Parameters
-    ----------
-    r, theta  : geometry
-    t_end     : propagation window (fs)
-    n_steps   : time-grid points for P₄(t)
-
-    Returns
-    -------
-    times [fs], P4 [dimensionless], Reff [fs⁻¹]
-    """
-    from efficiency import compute_Reff
-
-    K, w4, P0 = _secular_setup(r, theta, lambda_, gamma_bath, temperature)
-
-    t_max_int = t_end * 2.0 * np.pi * C_FS
-    times_int = np.linspace(0.0, t_max_int, n_steps)
-    times_fs  = times_int / (2.0 * np.pi * C_FS)
-
-    klam, kV = np.linalg.eig(K)
-    c = (w4 @ kV) * np.linalg.solve(kV, P0)   # spectral coefficients
-
-    P4 = np.real(
-        np.sum(c[None, :] * np.exp(klam[None, :] * times_int[:, None]), axis=1)
-    ).clip(0.0, 1.0)
-
-    Reff = compute_Reff(times_fs, P4)
-    return times_fs, P4, Reff
-
-
-def run_ohmic_with_trap(
-    r: float,
-    theta: float,
-    kappa_trap_fs: float = 0.002,
-    t_end: float = 15_000.0,
-    n_steps: int = 500,
-    lambda_: float = LAMBDA_CM,
-    gamma_bath: float = GAMMA_CM,
-    temperature: float = TEMPERATURE_K,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """
-    Bloch-Redfield dynamics on a 5-site system: sites 1–4 (Frenkel) + trap (RC).
-
-    A Lindblad collapse operator c_trap = √κ_trap × |trap⟩⟨site4⟩ drains
-    excitation from site 4 irreversibly into the reaction-centre trap state.
-    Q(t) = P_trap(t) rises from 0 → 1, showing complete energy harvesting.
-
-    Parameters
-    ----------
-    kappa_trap_fs : trapping rate at site 4 [fs⁻¹] (default 0.002 = 2 ps⁻¹,
-                    the (0.5 ps)⁻¹ reaction-centre rate of Shabani et al.,
-                    Phys. Rev. E 89, 042706 (2014))
-    t_end         : propagation window [fs]
-    n_steps       : output time points
-
-    Returns
-    -------
-    times_fs [fs], P4 [site-4 population], Q [trap population 0→1]
-    """
-    N5 = N_SITES + 1
-
-    H_np = build_electronic_H(r, theta)
-    H_np -= np.mean(SITE_ENERGIES_CM) * np.eye(N_SITES)
-
-    H5 = np.zeros((N5, N5))
-    H5[:N_SITES, :N_SITES] = H_np
-    H = qt.Qobj(H5)
-
-    spectral_fn = _make_spectral_fn(lambda_, gamma_bath, temperature)
-    a_ops = [
-        (qt.ket2dm(qt.basis(N5, i)), spectral_fn)
-        for i in range(N_SITES)
-    ]
-
-    kappa_cm = kappa_trap_fs / (2.0 * np.pi * C_FS)
-    c_trap_arr = np.zeros((N5, N5))
-    c_trap_arr[N_SITES, N_SITES - 1] = np.sqrt(kappa_cm)   # |trap⟩⟨site4|
-    c_trap = qt.Qobj(c_trap_arr)
-
-    rho0 = qt.basis(N5, 0) * qt.basis(N5, 0).dag()
-
-    t_max_int = t_end * 2.0 * np.pi * C_FS
-    times_int = np.linspace(0.0, t_max_int, n_steps)
-
-    result = qt.brmesolve(
-        H, rho0, times_int,
-        a_ops=a_ops, c_ops=[c_trap],
-        sec_cutoff=0.1,
-        options={"nsteps": 100000, "rtol": 1e-8, "atol": 1e-10, "method": "adams"},
-    )
-
-    times_fs = times_int / (2.0 * np.pi * C_FS)
-    P4 = np.array([float(rho[N_SITES - 1, N_SITES - 1].real) for rho in result.states])
-    Q  = np.array([float(rho[N_SITES,     N_SITES].real)     for rho in result.states])
-
-    return times_fs, P4, Q
-
-
 if __name__ == "__main__":
-    import matplotlib.pyplot as plt
-
-    t, rhos = run_ohmic(r=11.3, theta=0.0, t_end=3000.0, n_steps=300)
-    for i, label in enumerate(["P1", "P2", "P3", "P4"]):
-        plt.plot(t, population(rhos, i), label=label)
-    plt.xlabel("Time (fs)")
-    plt.ylabel("Population")
-    plt.legend()
-    plt.title("r=11.3 Å, θ=0")
-    plt.tight_layout()
-    plt.savefig("results/dynamics_single.png", dpi=150)
-    print("Saved results/dynamics_single.png")
+    H = build_electronic_H()
+    for s in range(N_SITES):
+        ete, tau = compute_ete(H, initial_sites=(s,))
+        print(f"start BChl {s+1}:  ETE = {ete:.4f}   tau = {tau/1000:.2f} ps")
+    ete, tau = compute_ete(H)
+    print(f"\nentry-averaged (BChl 1 & 6):  ETE = {ete:.4f}   tau = {tau/1000:.2f} ps")

@@ -8,20 +8,19 @@ Usage
     python run_all.py --quick      # fast low-res run for testing
     python run_all.py --gpu --quick
 
-Outputs (in results/)
----------------------
-    fig1_dynamics.png          validate.py       — P4(t) traces at 3 geometries
-    fig2a_reff_heatmap.png     validate.py       — Reff(r,θ) heatmap (Ohmic)
-    fig3_p4_comparison.png     analysis.py       — Ohmic vs vibronic P4(t)
-    fig4_coherence_spectra.png analysis.py       — exciton coherence FFT
-    fig5_reff_comparison.png   phase4_scan.py    — full Reff(r,θ) scan
-    fig6_bath_sensitivity.png  phase5_sensitivity.py — bath parameter sweep
-    fig7_summary.png           phase6_summary.py — 6-panel summary
+Outputs (in results/) — 8-site FMO model
+----------------------------------------
+    fig1_funnel_dynamics.png    validate.py       — site populations + RC yield
+    fig2_fmo_hamiltonian.png    validate.py       — 8x8 H, exciton ladder, τ/site
+    fig3_ohmic_vs_vibronic.png  analysis.py       — populations, Ohmic vs vibronic
+    fig4_coherence_spectra.png  analysis.py       — exciton coherence FFT (fixed)
+    fig5_position_scan.png      phase4_scan.py    — per-pigment scan + global optimum
+    fig6_bath_sensitivity.png   phase5_sensitivity.py — ETE/τ vs bath params
+    fig7_summary.png            phase6_summary.py — 6-panel summary
 
-    r_grid.npy / theta_grid.npy / reff_ohmic.npy   (Phase 1)
-    p4_r_grid.npy / p4_theta_grid.npy              (Phase 4)
-    p4_reff_ohmic.npy / p4_reff_vibronic.npy       (Phase 4)
-    p5_sensitivity_data.npz                         (Phase 5)
+    fmo_hamiltonian.npy            (Phase 1)
+    p4_position_scan.npz           (Phase 4: per-pigment grids + optimisation)
+    p5_sensitivity_data.npz        (Phase 5)
 """
 
 from __future__ import annotations

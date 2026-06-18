@@ -1,22 +1,20 @@
 """
-Phase 6: Summary figure and quantitative conclusions.
+Phase 6: Summary figure for the 8-site FMO position-vs-efficiency study.
 
-Assembles a publication-style 6-panel figure that tells the full story:
+Six panels:
+    [1] Reaction-centre yield Q(t) entering at BChl 1 vs BChl 6
+    [2] Native FMO coupling matrix (8x8)
+    [3] Trapping time & ETE per starting pigment
+    [4] Global position optimisation: native -> optimised arrangement
+    [5] Bath sensitivity: ETE & trapping time vs reorganisation energy λ
+    [6] Exciton coherence spectrum (FFT of complex coherence) — Ohmic vs vibronic
 
-    [1] P₄(t) at optimal geometry — Ohmic vs vibronic
-    [2] Reff(r,θ) heatmap — Ohmic (secular Redfield)
-    [3] Reff(r,θ) heatmap — Vibronic (Lindblad)
-    [4] ΔReff = vibronic − Ohmic  (signed enhancement map)
-    [5] Bath λ sensitivity at r=11.3 Å
-    [6] Coherence spectrum at r=11.3 Å — Ohmic vs vibronic (overlaid)
-
-All data is loaded from previously saved .npy / .npz files where possible,
-so this script is fast to re-run after all prior phases have completed.
+Cached data from Phases 4–5 is loaded where available; dynamics and coherence
+are computed fresh at the native geometry.
 
 Usage
 -----
     python phase6_summary.py
-    python phase6_summary.py --recompute   # ignore cached data and rerun
 """
 
 from __future__ import annotations
@@ -28,305 +26,159 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.gridspec as gridspec
-from scipy.linalg import eigh as _eigh
 
 sys.path.insert(0, str(Path(__file__).parent))
 warnings.filterwarnings("ignore")
 
+from dynamics import run_with_trap, compute_ete
+from hamiltonian import build_electronic_H
+from fmo_data import N_SITES, TRAP_SITE, ENTRY_SITES
+from geometry_scan import PLANE_AXES, CENTROID
+
 RESULTS_DIR = Path(__file__).parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
 
-C_FS = 3e-5
+_SITE_COLORS = plt.cm.viridis(np.linspace(0, 0.92, N_SITES))
 
 
-# ── Data loaders (with fallback recomputation) ─────────────────────────────────
-
-def _load_or(path: Path, recompute: bool, compute_fn):
-    """Return loaded array or call compute_fn() to generate it."""
-    if not recompute and path.exists():
-        return np.load(path, allow_pickle=True)
-    print(f"  Recomputing {path.name} …")
-    result = compute_fn()
-    np.save(path, result)
-    return result
-
-
-def _load_npz_or(path: Path, recompute: bool, compute_fn):
-    if not recompute and path.exists():
-        return dict(np.load(path, allow_pickle=True))
-    print(f"  Recomputing {path.name} …")
-    return compute_fn()
-
-
-def _compute_p4_dynamics(r=11.3, theta=0.0, t_end=5000.0, n_steps=400):
-    from dynamics import run_ohmic, population
-    from vibronic import run_structured, population_vibronic
-    t_A, rhos_A = run_ohmic(r=r, theta=theta, t_end=t_end, n_steps=n_steps)
-    P4_A = population(rhos_A, site=3)
-    t_B, rhos_el_B = run_structured(r=r, theta=theta, t_end=t_end, n_steps=n_steps)
-    P4_B = population_vibronic(rhos_el_B, site=3)
-    return t_A, P4_A, t_B, P4_B, rhos_A, rhos_el_B
-
-
-def _compute_coherence(rhos, r, theta, is_vibronic=False):
-    from hamiltonian import build_electronic_H, SITE_ENERGIES_CM
-    H_np = build_electronic_H(r, theta)
-    H_np -= np.mean(SITE_ENERGIES_CM) * np.eye(4)
-    _, U = _eigh(H_np)
-
-    # Batch partial-trace and basis transform all timesteps at once
-    rhos_np = np.array([
-        np.array((rho.ptrace([0]) if is_vibronic else rho).full())
-        for rho in rhos
-    ])  # (T, 4, 4)
-    Uc = U.conj().T
-    rhos_ex = np.einsum("ij,kjl,lm->kim", Uc, rhos_np, U)  # (T, 4, 4)
-
-    triu = np.triu(np.ones((4, 4), dtype=bool), k=1)
-    return np.sum(np.abs(rhos_ex[:, triu]), axis=1)  # (T,)
-
-
-# ── Panel helpers ──────────────────────────────────────────────────────────────
-
-def _panel_dynamics(ax, t_A, P4_A, t_B, P4_B):
-    ax.plot(t_A, P4_A, color="#1a6e8c", lw=1.8, label="Ohmic")
-    ax.plot(t_B, P4_B, color="#d45f1e", lw=1.8, ls="--", label="Vibronic")
-    ax.set_xlabel("Time (fs)", fontsize=9)
-    ax.set_ylabel("P₄(t)", fontsize=9)
-    ax.set_title("P₄(t) at optimal geometry\n(r=11.3 Å, θ=0°)", fontsize=9)
-    ax.set_xlim(0, t_A[-1])
-    ax.set_ylim(0, None)
-    ax.legend(frameon=False, fontsize=8)
-    ax.grid(True, alpha=0.2, linestyle="--")
+def _panel_yield(ax):
+    for s, color in zip(ENTRY_SITES, ["#1f6f78", "#c8531e"]):
+        t, _, Q, L = run_with_trap(initial_site=s, t_end=30000.0, n_steps=400)
+        ax.plot(t / 1000, Q, color=color, lw=2.0, label=f"start BChl {s+1}")
+    ax.axhline(1.0, color="gray", ls=":", lw=1.0, alpha=0.5)
+    ete, tau = compute_ete(build_electronic_H())
+    ax.set_xlabel("Time (ps)", fontsize=9); ax.set_ylabel("RC yield Q(t)", fontsize=9)
+    ax.set_title(f"Energy → reaction centre\n(ETE={ete:.3f}, τ={tau/1000:.1f} ps)", fontsize=9)
+    ax.set_ylim(0, 1.05); ax.legend(frameon=False, fontsize=8)
+    ax.grid(True, alpha=0.2, ls="--")
     ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
 
 
-def _panel_heatmap(ax, fig, r_grid, theta_grid, reff_grid, title, cmap="viridis",
-                   vmin=None, vmax=None, center=None):
-    theta_deg = np.degrees(theta_grid)
-    kwargs = dict(cmap=cmap, shading="auto")
-    if center is not None:
-        abs_max = np.abs(reff_grid * 1e3).max()
-        kwargs.update(vmin=-abs_max, vmax=abs_max)
-    else:
-        # 98th-percentile cap so the sub-100 fs resonance ridge does not
-        # saturate the scale and hide the slow-transfer gradient.
-        kwargs.update(vmin=vmin or 0,
-                      vmax=vmax or float(np.percentile(reff_grid * 1e3, 98)))
-    img = ax.pcolormesh(theta_deg, r_grid, reff_grid * 1e3, **kwargs)
-    cb  = fig.colorbar(img, ax=ax, pad=0.02)
-    cb.set_label("Reff (ps⁻¹)", fontsize=8)
-    cb.ax.tick_params(labelsize=7)
+def _panel_coupling(ax, fig):
+    H = build_electronic_H()
+    J = H - np.diag(np.diag(H))
+    vmax = np.abs(J).max()
+    im = ax.imshow(J, cmap="RdBu_r", vmin=-vmax, vmax=vmax)
+    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.02).set_label("J (cm⁻¹)", fontsize=8)
+    ax.set_xticks(range(N_SITES)); ax.set_xticklabels(range(1, N_SITES+1), fontsize=7)
+    ax.set_yticks(range(N_SITES)); ax.set_yticklabels(range(1, N_SITES+1), fontsize=7)
+    ax.set_title("Native FMO coupling matrix", fontsize=9)
 
-    idx = np.unravel_index(np.argmax(reff_grid), reff_grid.shape)
-    r_opt, th_opt = r_grid[idx[0]], theta_grid[idx[1]]
-    ax.plot(np.degrees(th_opt), r_opt, "w*", ms=9, label=f"{r_opt:.1f} Å, {np.degrees(th_opt):.0f}°")
+
+def _panel_per_site(ax):
+    H = build_electronic_H()
+    taus, etes = [], []
+    for s in range(N_SITES):
+        e, t = compute_ete(H, initial_sites=(s,))
+        taus.append(t / 1000); etes.append(e)
+    edge = ["black" if (i == TRAP_SITE or i in ENTRY_SITES) else "none"
+            for i in range(N_SITES)]
+    ax.bar(range(1, N_SITES+1), taus, color=[_SITE_COLORS[i] for i in range(N_SITES)],
+           edgecolor=edge, linewidth=1.3)
+    ax.set_xlabel("starting BChl (outlined = entry/trap)", fontsize=9)
+    ax.set_ylabel("trapping time (ps)", fontsize=9)
+    ax.set_title("Trapping time per entry site", fontsize=9)
+    ax.set_xticks(range(1, N_SITES+1)); ax.tick_params(labelsize=7)
+    ax.grid(True, axis="y", alpha=0.2, ls="--")
+    ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
+
+
+def _panel_optimum(ax):
+    path = RESULTS_DIR / "p4_position_scan.npz"
+    if not path.exists() or "pos_opt" not in np.load(path).files:
+        ax.text(0.5, 0.5, "run phase4_scan.py\nfor optimisation", ha="center",
+                va="center", transform=ax.transAxes, fontsize=9)
+        ax.set_title("Global position optimum", fontsize=9); return
+    d = np.load(path)
+    nat2d = (d["pos_native"] - CENTROID) @ PLANE_AXES.T
+    opt2d = (d["pos_opt"] - CENTROID) @ PLANE_AXES.T
+    for i in range(N_SITES):
+        ax.annotate("", xy=opt2d[i], xytext=nat2d[i],
+                    arrowprops=dict(arrowstyle="->", color="#444", lw=1.1))
+    ax.scatter(*nat2d.T, c="#888", s=55, edgecolor="white", zorder=3, label="native")
+    colors = ["#ff3b3b" if i == TRAP_SITE else "#1a9e4b" if i in ENTRY_SITES
+              else "#1a6e8c" for i in range(N_SITES)]
+    ax.scatter(*opt2d.T, c=colors, s=60, edgecolor="white", zorder=4, label="optimised")
+    for i in range(N_SITES):
+        ax.text(opt2d[i, 0], opt2d[i, 1], f" {i+1}", fontsize=7, zorder=5)
+    ax.set_aspect("equal"); ax.set_xlabel("e₁ (Å)", fontsize=9); ax.set_ylabel("e₂ (Å)", fontsize=9)
     ax.legend(frameon=False, fontsize=7, loc="upper right")
-    ax.set_xlabel("θ (°)", fontsize=9); ax.set_ylabel("r (Å)", fontsize=9)
-    ax.set_title(title, fontsize=9)
+    ax.set_title(f"Position optimum: ETE {float(d['ete_native']):.3f}→{float(d['ete_opt']):.3f}, "
+                 f"τ {float(d['tau_native'])/1000:.1f}→{float(d['tau_opt'])/1000:.1f} ps",
+                 fontsize=8)
 
 
-def _panel_sensitivity(ax, lam_grid, ohm_lam, vib_lam, lambda_default=35.0):
-    ax.plot(lam_grid, ohm_lam * 1e3, color="#1a6e8c", lw=1.8, label="Ohmic")
-    ax.plot(lam_grid, vib_lam * 1e3, color="#d45f1e", lw=1.8, ls="--", label="Vibronic")
-    ax.axvline(lambda_default, color="gray", ls=":", lw=1.0)
-    ax.set_xlabel("λ (cm⁻¹)", fontsize=9); ax.set_ylabel("Reff (ps⁻¹)", fontsize=9)
-    ax.set_title("Reff vs reorganisation energy\n(r=11.3 Å, θ=0°)", fontsize=9)
-    ax.legend(frameon=False, fontsize=8)
-    ax.grid(True, alpha=0.2, linestyle="--")
-    ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
+def _panel_lambda(ax):
+    path = RESULTS_DIR / "p5_sensitivity_data.npz"
+    if not path.exists():
+        ax.text(0.5, 0.5, "run phase5", ha="center", va="center",
+                transform=ax.transAxes, fontsize=9)
+        ax.set_title("ETE vs λ", fontsize=9); return
+    d = np.load(path)
+    lam, ete, tau = d["lambda_grid"], d["ete_lam"], d["tau_lam"]
+    ax.plot(lam, ete, color="#1a6e8c", lw=2.0)
+    ax.set_xlabel("λ (cm⁻¹)", fontsize=9); ax.set_ylabel("ETE", color="#1a6e8c", fontsize=9)
+    ax.tick_params(axis="y", labelcolor="#1a6e8c")
+    ax.axvline(35.0, color="gray", ls=":", lw=1.0)
+    ax2 = ax.twinx()
+    ax2.plot(lam, tau, color="#d45f1e", lw=2.0, ls="--")
+    ax2.set_ylabel("τ (ps)", color="#d45f1e", fontsize=9)
+    ax2.tick_params(axis="y", labelcolor="#d45f1e"); ax2.spines["top"].set_visible(False)
+    ax.set_title("Efficiency vs reorganisation λ", fontsize=9)
+    ax.spines["top"].set_visible(False); ax.grid(True, alpha=0.18, ls="--")
 
 
-def _panel_coherence(ax, t_A, coh_A, t_B, coh_B,
-                     window_start=300.0, window_end=2000.0):
-    def _fft(times, coh):
-        mask = (times >= window_start) & (times <= window_end)
-        t_w  = times[mask]; sig = coh[mask]
-        if t_w.size < 4:
-            return np.array([0.0]), np.array([0.0])
-        dt   = np.mean(np.diff(t_w))
-        freq = np.fft.rfftfreq(t_w.size, d=dt) / C_FS   # cm⁻¹
-        power = np.abs(np.fft.rfft(sig)) ** 2
-        return freq, power / max(power.max(), 1e-30)
+def _panel_coherence(ax):
+    from analysis import _exciton_coherences, _coherence_spectrum
+    from dynamics import run_ohmic
+    from vibronic import run_structured, OMEGA1_CM, OMEGA2_CM
+    t_A, rhos_A = run_ohmic(initial_site=ENTRY_SITES[0], t_end=5000.0, n_steps=600)
+    eig, ex_A = _exciton_coherences(rhos_A, is_vibronic=False)
+    t_B, rhos_B = run_structured(initial_site=ENTRY_SITES[0], t_end=5000.0, n_steps=600)
+    _, ex_B = _exciton_coherences(rhos_B, is_vibronic=True)
 
-    f_A, p_A = _fft(t_A, coh_A)
-    f_B, p_B = _fft(t_B, coh_B)
-    mask_f = f_A <= 1000.0
-    ax.plot(f_A[mask_f], p_A[mask_f], color="#1a6e8c", lw=1.5, label="Ohmic")
-    mask_f2 = f_B <= 1000.0
-    ax.plot(f_B[mask_f2], p_B[mask_f2], color="#d45f1e", lw=1.5, ls="--", label="Vibronic")
-    for omega, name in [(770, "770"), (243, "243")]:
-        ax.axvline(omega, color="gray", ls=":", lw=0.9, alpha=0.6)
-        ax.text(omega + 8, 0.82, name, fontsize=7, color="gray")
+    for ex, color, label in [(ex_A, "#1a6e8c", "Ohmic"), (ex_B, "#d45f1e", "Vibronic")]:
+        f, p = _coherence_spectrum(t_A, ex, 100.0, 3000.0)
+        pos = f >= 0; f, p = f[pos], p[pos]
+        if p.max() > 0: p = p / p.max()
+        m = f <= 1000
+        ax.plot(f[m], p[m], color=color, lw=1.4, ls="--" if label == "Vibronic" else "-",
+                label=label)
+    for omega in (OMEGA1_CM, OMEGA2_CM):
+        ax.axvline(omega, color="#a33", ls=":", lw=0.9, alpha=0.6)
+        ax.text(omega + 6, 0.85, f"{omega:.0f}", fontsize=7, color="#a33")
     ax.set_xlabel("Frequency (cm⁻¹)", fontsize=9); ax.set_ylabel("Power (norm.)", fontsize=9)
-    ax.set_title("Exciton coherence spectrum\n(r=11.3 Å, θ=0°)", fontsize=9)
-    ax.set_xlim(0, 1000); ax.set_ylim(0, 1.05)
-    ax.legend(frameon=False, fontsize=8)
-    ax.grid(True, alpha=0.2, linestyle="--")
+    ax.set_title("Exciton coherence spectrum", fontsize=9)
+    ax.set_xlim(0, 1000); ax.set_ylim(0, 1.05); ax.legend(frameon=False, fontsize=8)
+    ax.grid(True, alpha=0.2, ls="--")
     ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
 
 
-# ── Main ───────────────────────────────────────────────────────────────────────
-
-def build_summary(recompute: bool = False) -> None:
-    # ── load / compute all data ──
-    print("Loading Phase 4 heatmap data …")
-    try:
-        r_ohm    = np.load(RESULTS_DIR / "p4_r_grid.npy")
-        th_ohm   = np.load(RESULTS_DIR / "p4_theta_grid.npy")
-        ohm_grid = np.load(RESULTS_DIR / "p4_reff_ohmic.npy")
-        # Load separate vibronic grid files (new format); fall back to ohmic grid
-        try:
-            r_vib  = np.load(RESULTS_DIR / "p4_r_grid_vib.npy")
-            th_vib = np.load(RESULTS_DIR / "p4_theta_grid_vib.npy")
-        except FileNotFoundError:
-            r_vib  = r_ohm
-            th_vib = th_ohm
-        vib_grid = np.load(RESULTS_DIR / "p4_reff_vibronic.npy")
-        r_grid   = r_ohm
-        th_grid  = th_ohm
-        have_p4  = True
-    except FileNotFoundError:
-        print("  Phase 4 data missing — will use Phase 1 heatmap data")
-        try:
-            r_ohm    = np.load(RESULTS_DIR / "r_grid.npy")
-            th_ohm   = np.load(RESULTS_DIR / "theta_grid.npy")
-            ohm_grid = np.load(RESULTS_DIR / "reff_ohmic.npy")
-            r_vib = r_ohm; th_vib = th_ohm; vib_grid = None
-            r_grid = r_ohm; th_grid = th_ohm
-            have_p4 = False
-        except FileNotFoundError:
-            r_ohm = th_ohm = r_vib = th_vib = r_grid = th_grid = ohm_grid = vib_grid = None
-            have_p4 = False
-
-    print("Loading Phase 5 sensitivity data …")
-    try:
-        p5 = dict(np.load(RESULTS_DIR / "p5_sensitivity_data.npz"))
-        have_p5 = True
-    except FileNotFoundError:
-        print("  Phase 5 data missing — will skip sensitivity panel")
-        have_p5 = False
-        p5 = {}
-
-    print("Computing dynamics at optimal geometry …")
-    from dynamics import run_ohmic, population
-    from vibronic import run_structured, population_vibronic
-    from tqdm import tqdm
-
-    with tqdm(total=2, desc="Dynamics", unit="solve") as bar:
-        bar.set_description("Ohmic (brmesolve)")
-        t_A, rhos_A = run_ohmic(r=11.3, theta=0.0, t_end=5000.0, n_steps=600)
-        P4_A = population(rhos_A, site=3)
-        coh_A = _compute_coherence(rhos_A, 11.3, 0.0, is_vibronic=False)
-        bar.update(1)
-
-        bar.set_description("Vibronic (GPU diffrax)")
-        t_B, rhos_el_B = run_structured(r=11.3, theta=0.0, t_end=5000.0, n_steps=600)
-        P4_B = population_vibronic(rhos_el_B, site=3)
-        coh_B = _compute_coherence(rhos_el_B, 11.3, 0.0, is_vibronic=True)
-        bar.update(1)
-
-    # ── build figure ──
+def build_summary() -> None:
     fig = plt.figure(figsize=(16, 9), dpi=150)
     fig.patch.set_facecolor("#f7f2ea")
-    gs  = gridspec.GridSpec(2, 3, figure=fig, hspace=0.45, wspace=0.38)
-
+    gs = gridspec.GridSpec(2, 3, figure=fig, hspace=0.42, wspace=0.4)
     axes = [fig.add_subplot(gs[r, c]) for r in range(2) for c in range(3)]
     for ax in axes:
         ax.set_facecolor("#fffdf7")
 
-    # Panel 1: dynamics
-    _panel_dynamics(axes[0], t_A, P4_A, t_B, P4_B)
+    print("  [1/6] RC yield …");        _panel_yield(axes[0])
+    print("  [2/6] coupling matrix …"); _panel_coupling(axes[1], fig)
+    print("  [3/6] per-site trapping …"); _panel_per_site(axes[2])
+    print("  [4/6] position optimum …"); _panel_optimum(axes[3])
+    print("  [5/6] bath sensitivity …"); _panel_lambda(axes[4])
+    print("  [6/6] coherence spectrum …"); _panel_coherence(axes[5])
 
-    # Panel 2: Ohmic heatmap
-    if ohm_grid is not None:
-        _panel_heatmap(axes[1], fig, r_grid, th_grid, ohm_grid,
-                       "Reff(r,θ) — Ohmic")
-    else:
-        axes[1].text(0.5, 0.5, "Phase 4 data\nnot found", ha="center",
-                     va="center", transform=axes[1].transAxes, fontsize=10)
-        axes[1].set_title("Reff(r,θ) — Ohmic", fontsize=9)
-
-    # Panel 3: Vibronic heatmap
-    if vib_grid is not None:
-        _panel_heatmap(axes[2], fig, r_vib, th_vib, vib_grid,
-                       "Reff(r,θ) — Vibronic")
-    elif ohm_grid is not None:
-        axes[2].text(0.5, 0.5, "Vibronic scan\nnot available", ha="center",
-                     va="center", transform=axes[2].transAxes, fontsize=10)
-        axes[2].set_title("Reff(r,θ) — Vibronic", fontsize=9)
-
-    # Panel 4: ΔReff — interpolate vibronic onto ohmic grid if grids differ
-    if ohm_grid is not None and vib_grid is not None:
-        if not (np.array_equal(r_vib, r_ohm) and np.array_equal(th_vib, th_ohm)):
-            from scipy.interpolate import RegularGridInterpolator
-            interp = RegularGridInterpolator(
-                (r_vib, th_vib), vib_grid, method="linear",
-                bounds_error=False, fill_value=0.0,
-            )
-            R_mg, T_mg = np.meshgrid(r_ohm, th_ohm, indexing="ij")
-            vib_on_ohm = interp(np.column_stack([R_mg.ravel(), T_mg.ravel()])
-                                ).reshape(len(r_ohm), len(th_ohm))
-        else:
-            vib_on_ohm = vib_grid
-        delta = vib_on_ohm - ohm_grid
-        _panel_heatmap(axes[3], fig, r_ohm, th_ohm, delta,
-                       "ΔReff (vibronic − Ohmic)", cmap="RdBu_r", center=True)
-    elif ohm_grid is not None:
-        axes[3].text(0.5, 0.5, "ΔReff requires\nPhase 4 vibronic data",
-                     ha="center", va="center", transform=axes[3].transAxes, fontsize=10)
-        axes[3].set_title("ΔReff (vibronic − Ohmic)", fontsize=9)
-
-    # Panel 5: λ sensitivity
-    if have_p5:
-        _panel_sensitivity(axes[4],
-                           p5["lambda_grid"], p5["ohm_lam"], p5["vib_lam"])
-    else:
-        axes[4].text(0.5, 0.5, "Phase 5 data\nnot found", ha="center",
-                     va="center", transform=axes[4].transAxes, fontsize=10)
-        axes[4].set_title("Reff vs λ", fontsize=9)
-
-    # Panel 6: coherence spectrum
-    _panel_coherence(axes[5], t_A, coh_A, t_B, coh_B,
-                     window_start=300.0, window_end=2000.0)
-
-    fig.suptitle(
-        "Summary: 4-site dimerized Frenkel exciton — Ohmic vs vibronic bath",
-        fontsize=13, y=0.98
-    )
+    fig.suptitle("Summary: 8-site FMO — position-dependent excitation transfer to the reaction centre",
+                 fontsize=13, y=0.98)
     out = RESULTS_DIR / "fig7_summary.png"
     fig.savefig(out, bbox_inches="tight")
     print(f"\nSaved {out}")
 
-    # ── print key numbers ──
-    print("\n=== Key results ===")
-    print(f"  Ohmic   Reff at r=11.3 Å: {_ohm_reff_opt()*1e3:.4f} ps⁻¹")
-    if ohm_grid is not None:
-        idx = np.unravel_index(np.argmax(ohm_grid), ohm_grid.shape)
-        print(f"  Ohmic   peak Reff: {ohm_grid[idx]*1e3:.3f} ps⁻¹ at "
-              f"r={r_ohm[idx[0]]:.1f} Å, θ={np.degrees(th_ohm[idx[1]]):.0f}°")
-    if vib_grid is not None:
-        idx2 = np.unravel_index(np.argmax(vib_grid), vib_grid.shape)
-        print(f"  Vibronic peak Reff: {vib_grid[idx2]*1e3:.3f} ps⁻¹ at "
-              f"r={r_vib[idx2[0]]:.1f} Å, θ={np.degrees(th_vib[idx2[1]]):.0f}°")
-
-
-def _ohm_reff_opt():
-    from dynamics import secular_reff
-    _, _, reff = secular_reff(11.3, 0.0)
-    return reff
-
 
 if __name__ == "__main__":
-    import argparse
     from gpu_utils import setup_gpu
     setup_gpu()
-
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--recompute", action="store_true",
-                        help="Recompute dynamics rather than loading cached data")
-    args = parser.parse_args()
-
     print("=== Phase 6: Summary figure ===")
-    build_summary(recompute=args.recompute)
+    build_summary()
     print("\nDone.")

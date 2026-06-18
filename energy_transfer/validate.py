@@ -1,20 +1,24 @@
 """
-Phase 1 validation: reproduce Ai et al. Figure 1 (dynamics) and Figure 2a (Reff heatmap).
+Phase 1: the 8-site FMO model — reference Hamiltonian and energy-funnel dynamics.
 
-Run this script directly to execute the full validation.  Results are saved to results/.
+Two figures:
+    fig1_funnel_dynamics.png  — site populations P_i(t) with reaction-centre
+                                trapping at BChl 3, plus the cumulative RC yield
+                                Q(t) for excitation entering at BChl 1 vs BChl 6.
+    fig2_fmo_hamiltonian.png  — the native FMO 8x8 Hamiltonian (heatmap), the
+                                exciton energy ladder, and the trapping time per
+                                starting pigment.
 
+Validation against the literature is built into fmo_data.validate_hamiltonian()
+(point-dipole couplings reproduce the published TrEsp Hamiltonian to ~9 cm^-1
+RMS) and the trapping numbers (ETE ~ 0.99, trapping time ~ few ps) match the
+known high efficiency of FMO.
+
+Usage
+-----
     python validate.py
-
-Qualitative targets
--------------------
-Figure 1:  Three Q(t) traces (cumulative trapping yield, 0→1) at θ=0 for
-           r = 8, 11.4, 13.4 Å with a reaction-centre trap (κ=2 ps⁻¹) at site 4.
-           r=11.4 Å should show the fastest / most efficient transfer.
-           r=8 Å  should show reduced transfer (strong coupling → delocalised,
-                  less energy-gradient drive).
-
-Figure 2a: Reff(r, θ) heatmap with a peak near r ≈ 11.3 Å, θ ≈ 0,
-           shown as both a 2-D heatmap and a 3-D surface.
+    python validate.py --quick
+    python validate.py --fig1-only / --fig2-only
 """
 
 from __future__ import annotations
@@ -25,251 +29,176 @@ from pathlib import Path
 
 import numpy as np
 import matplotlib.pyplot as plt
-from joblib import Parallel, delayed
 from tqdm import tqdm
 
-# Allow running from the energy_transfer/ directory directly
 sys.path.insert(0, str(Path(__file__).parent))
 
-from dynamics import secular_reff, run_ohmic_with_trap
-from efficiency import compute_Reff
-from hamiltonian import build_electronic_H, coupling_matrix
-
+from dynamics import run_with_trap, compute_ete, K_TRAP_FS
+from hamiltonian import build_electronic_H
+from fmo_data import (
+    SITE_ENERGIES_CM, N_SITES, TRAP_SITE, ENTRY_SITES, validate_hamiltonian,
+)
 
 RESULTS_DIR = Path(__file__).parent / "results"
 RESULTS_DIR.mkdir(exist_ok=True)
 
+_SITE_COLORS = plt.cm.viridis(np.linspace(0, 0.92, N_SITES))
 
-# ── Unit check ────────────────────────────────────────────────────────────────
 
 def unit_check() -> None:
-    """Print coupling values at r=10.8 Å, θ=0 for manual comparison with paper."""
-    r, theta = 10.8, 0.0
-    J = coupling_matrix(r, theta)
-    print("Coupling matrix at r=10.8 Å, θ=0 (cm⁻¹):")
-    print(f"  J12={J[0,1]:+.1f}  J23={J[1,2]:+.1f}  J34={J[2,3]:+.1f}")
-    print(f"  J13={J[0,2]:+.1f}  J24={J[1,3]:+.1f}  J14={J[0,3]:+.1f}")
-
-    J2 = coupling_matrix(11.3, 0.0)
-    print("\nCoupling matrix at r=11.3 Å, θ=0 (reported optimum):")
-    print(f"  J12={J2[0,1]:+.1f}  J23={J2[1,2]:+.1f}  J34={J2[2,3]:+.1f}")
-    print(f"  J13={J2[0,2]:+.1f}  J24={J2[1,3]:+.1f}  J14={J2[0,3]:+.1f}")
+    """Print the literature self-checks."""
+    print(f"  Point-dipole vs published couplings: RMS = {validate_hamiltonian():.2f} cm⁻¹")
+    H = build_electronic_H()
+    eig = np.linalg.eigvalsh(H)
+    print(f"  Exciton band span: {eig[-1]-eig[0]:.0f} cm⁻¹ (lowest exciton {eig[0]:.0f})")
+    ete, tau = compute_ete(H)
+    print(f"  Native ETE (entry-averaged): {ete:.4f},  trapping time {tau/1000:.2f} ps")
 
 
-# ── Figure 1 reproduction ─────────────────────────────────────────────────────
+# ── Figure 1: energy-funnel dynamics ──────────────────────────────────────────
 
-def reproduce_figure1(
-    t_end: float = 15_000.0,
-    n_steps: int = 500,
-    kappa_trap_fs: float = 0.002,
-) -> None:
-    """
-    Plot reaction-centre trapping yield Q(t) for three geometries at θ=0.
-
-    A 5-site Bloch-Redfield simulation: sites 1–4 (Frenkel Hamiltonian) plus
-    an irreversible trap at site 5 (reaction centre), coupled to site 4 via a
-    Lindblad collapse operator at rate κ_trap.
-    Q(t) = P_trap(t) rises from 0 → 1, showing complete biological energy harvesting.
-    """
-    configs = [
-        (8.0,  "#e05c3a"),
-        (11.4, "#1f6f78"),
-        (13.4, "#c8a227"),
-    ]
-
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5), dpi=150)
+def figure1_funnel(t_end: float = 15_000.0, n_steps: int = 500) -> None:
+    fig, axes = plt.subplots(1, 2, figsize=(13, 4.8), dpi=150)
     fig.patch.set_facecolor("#f7f2ea")
     for ax in axes:
         ax.set_facecolor("#fffdf7")
 
-    ax_q, ax_p = axes
+    # Left: full site-population trajectory starting at BChl 1
+    t0 = time.time()
+    times, P_sites, Q, L = run_with_trap(initial_site=ENTRY_SITES[0],
+                                         t_end=t_end, n_steps=n_steps)
+    print(f"  trajectory (start BChl {ENTRY_SITES[0]+1}): {time.time()-t0:.1f}s "
+          f"Q(final)={Q[-1]:.3f}")
+    ax = axes[0]
+    for i in range(N_SITES):
+        lw = 2.4 if i in (ENTRY_SITES[0], TRAP_SITE) else 1.1
+        ax.plot(times / 1000, P_sites[:, i], color=_SITE_COLORS[i], lw=lw,
+                label=f"BChl {i+1}" + (" (entry)" if i == ENTRY_SITES[0]
+                                       else " (→RC)" if i == TRAP_SITE else ""))
+    ax.set_xlabel("Time (ps)", fontsize=11)
+    ax.set_ylabel("Site population", fontsize=11)
+    ax.set_title(f"Site populations (start BChl {ENTRY_SITES[0]+1})", fontsize=11)
+    ax.set_xlim(0, t_end / 1000)
+    ax.set_ylim(0, None)
+    ax.legend(frameon=False, fontsize=7, ncol=2)
+    ax.grid(True, alpha=0.2, ls="--")
+    ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
 
-    for r_ang, color in tqdm(configs, desc="Fig 1 geometries", unit="geom"):
-        t0 = time.time()
-        times, P4, Q = run_ohmic_with_trap(
-            r=r_ang, theta=0.0,
-            kappa_trap_fs=kappa_trap_fs,
-            t_end=t_end, n_steps=n_steps,
-        )
-        tqdm.write(f"  r={r_ang} Å  done in {time.time()-t0:.1f}s  Q(final)={Q[-1]:.3f}")
-        times_ps = times / 1000.0  # convert fs → ps for readability
-        ax_q.plot(times_ps, Q,  color=color, linewidth=2.2, label=f"r = {r_ang} Å")
-        ax_p.plot(times_ps, P4, color=color, linewidth=2.2, label=f"r = {r_ang} Å",
-                  ls="--")
+    # Right: cumulative RC yield for each entry pigment
+    ax = axes[1]
+    for s, color in zip(ENTRY_SITES, ["#1f6f78", "#c8531e"]):
+        times, _, Q, L = run_with_trap(initial_site=s, t_end=t_end, n_steps=n_steps)
+        ax.plot(times / 1000, Q, color=color, lw=2.4, label=f"RC yield, start BChl {s+1}")
+        ax.plot(times / 1000, L, color=color, lw=1.2, ls=":",
+                label=f"lost, start BChl {s+1}")
+    ax.axhline(1.0, color="gray", ls=":", lw=1.0, alpha=0.5)
+    ax.set_xlabel("Time (ps)", fontsize=11)
+    ax.set_ylabel("Population", fontsize=11)
+    ax.set_title("Reaction-centre yield Q(t) and loss", fontsize=11)
+    ax.set_xlim(0, t_end / 1000)
+    ax.set_ylim(0, 1.05)
+    ax.legend(frameon=False, fontsize=8, loc="center right")
+    ax.grid(True, alpha=0.2, ls="--")
+    ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
 
-    for ax in axes:
-        ax.set_xlabel("Time (ps)", fontsize=11)
-        ax.set_xlim(0, t_end / 1000)
-        ax.legend(frameon=False)
-        ax.grid(True, alpha=0.2, linestyle="--")
-        ax.spines["top"].set_visible(False)
-        ax.spines["right"].set_visible(False)
-
-    ax_q.set_ylabel("Reaction-centre yield Q(t)", fontsize=11)
-    ax_q.set_ylim(0, 1.05)
-    ax_q.axhline(1.0, color="gray", ls=":", lw=1.0, alpha=0.5)
-    ax_q.set_title("Cumulative trapping yield (RC trap)", fontsize=10)
-
-    ax_p.set_ylabel("Site-4 population P₄(t)", fontsize=11)
-    ax_p.set_ylim(0, None)
-    ax_p.set_title("Site-4 transient population", fontsize=10)
-
-    fig.suptitle(
-        f"Fig. 1: Energy funnelling to reaction centre — Ohmic bath, θ = 0  "
-        f"(κ_trap = {kappa_trap_fs*1e3:.0f} ps⁻¹)",
-        fontsize=11,
-    )
+    fig.suptitle(f"Fig. 1: FMO energy funnel to the reaction centre "
+                 f"(trap at BChl {TRAP_SITE+1}, κ={K_TRAP_FS*1e3:.0f} ps⁻¹)",
+                 fontsize=12)
     fig.tight_layout()
-    out = RESULTS_DIR / "fig1_dynamics.png"
+    out = RESULTS_DIR / "fig1_funnel_dynamics.png"
     fig.savefig(out, bbox_inches="tight")
     print(f"  Saved {out}")
 
 
-# ── Figure 2a reproduction ────────────────────────────────────────────────────
+# ── Figure 2: native FMO Hamiltonian & exciton structure ──────────────────────
 
-def _reff_at_point(r: float, theta: float, t_end: float, n_steps: int) -> float:
-    """Compute Reff at a single (r, θ) point using secular Redfield."""
-    try:
-        _, _, reff = secular_reff(r, theta, t_end=t_end, n_steps=n_steps)
-        return reff
-    except Exception:
-        return 0.0
+def figure2_hamiltonian() -> None:
+    H = build_electronic_H()
+    eigvals, U = np.linalg.eigh(H)
 
-
-def reproduce_figure2a(
-    r_grid: np.ndarray | None = None,
-    theta_grid: np.ndarray | None = None,
-    t_end: float = 200_000.0,
-    n_steps: int = 400,
-    n_jobs: int = -1,
-) -> np.ndarray:
-    """
-    Compute and plot the Reff(r, θ) heatmap, mirroring Ai et al. Fig. 2a.
-
-    Saves two panels side-by-side:
-        Left  — 2-D colour heatmap
-        Right — 3-D surface heightmap
-
-    Parameters
-    ----------
-    r_grid     : 1-D array of r values (Å).  Default: 50 points, 8–14 Å.
-    theta_grid : 1-D array of θ values (rad).  Default: 30 points, 0–π/2.
-    t_end      : propagation length (fs)
-    n_steps    : number of time points per simulation
-    n_jobs     : joblib parallelism  (-1 = all cores)
-
-    Returns
-    -------
-    Reff_grid : (len(r_grid), len(theta_grid)) array  [fs⁻¹]
-    """
-    if r_grid is None:
-        r_grid = np.linspace(8.0, 14.0, 50)
-    if theta_grid is None:
-        theta_grid = np.linspace(0.0, np.pi / 2, 30)
-
-    jobs = [(r, th) for r in r_grid for th in theta_grid]
-    results_flat = list(tqdm(
-        Parallel(n_jobs=n_jobs, return_as="generator")(
-            delayed(_reff_at_point)(r, th, t_end, n_steps) for r, th in jobs
-        ),
-        total=len(jobs), desc="Reff scan", unit="pt",
-    ))
-
-    Reff_grid = np.array(results_flat).reshape(len(r_grid), len(theta_grid))
-
-    theta_deg = np.degrees(theta_grid)
-    idx_max   = np.unravel_index(np.argmax(Reff_grid), Reff_grid.shape)
-    r_opt, th_opt = r_grid[idx_max[0]], theta_grid[idx_max[1]]
-
-    # ── 2-D heatmap with contour overlay ────────────────────────────────────
-    fig, ax2d = plt.subplots(figsize=(8, 6), dpi=150)
+    fig, axes = plt.subplots(1, 3, figsize=(16, 4.8), dpi=150)
     fig.patch.set_facecolor("#f7f2ea")
-    ax2d.set_facecolor("#fffdf7")
+    for ax in axes:
+        ax.set_facecolor("#fffdf7")
 
-    # The resonance ridge (exciton gap ≈ bath peak) reaches the sub-100 fs
-    # regime where Redfield breaks down; cap the colour scale at the 98th
-    # percentile so the physically-meaningful gradient stays visible.
-    vmax = float(np.percentile(Reff_grid * 1e3, 98))
-    img = ax2d.pcolormesh(
-        theta_deg, r_grid, Reff_grid * 1e3,
-        cmap="viridis", shading="gouraud", vmin=0.0, vmax=vmax,
-    )
-    cb = fig.colorbar(img, ax=ax2d, extend="max")
-    cb.set_label("Reff (ps⁻¹)", fontsize=11)
+    # (a) Hamiltonian heatmap (couplings; diagonal blanked to show off-diagonal scale)
+    J = H - np.diag(np.diag(H))
+    ax = axes[0]
+    vmax = np.abs(J).max()
+    im = ax.imshow(J, cmap="RdBu_r", vmin=-vmax, vmax=vmax)
+    fig.colorbar(im, ax=ax, fraction=0.046).set_label("coupling J (cm⁻¹)", fontsize=9)
+    ax.set_xticks(range(N_SITES)); ax.set_xticklabels(range(1, N_SITES+1), fontsize=8)
+    ax.set_yticks(range(N_SITES)); ax.set_yticklabels(range(1, N_SITES+1), fontsize=8)
+    for i in range(N_SITES):
+        ax.text(i, i, f"{SITE_ENERGIES_CM[i]-12000:.0f}", ha="center", va="center",
+                fontsize=7, color="#333")
+    ax.set_title("Coupling matrix (diag = site energy − 12000 cm⁻¹)", fontsize=10)
+    ax.set_xlabel("BChl"); ax.set_ylabel("BChl")
 
-    # Contour lines for quantitative read-off
-    cs = ax2d.contour(theta_deg, r_grid, Reff_grid * 1e3,
-                      levels=8, colors="white", linewidths=0.6, alpha=0.5)
-    ax2d.clabel(cs, inline=True, fontsize=7, fmt="%.1f")
+    # (b) Exciton energy ladder, coloured by dominant site
+    ax = axes[1]
+    for a in range(N_SITES):
+        dom = int(np.argmax(U[:, a] ** 2))
+        ax.hlines(eigvals[a], 0, 1, color=_SITE_COLORS[dom], lw=2.5)
+        ax.text(1.02, eigvals[a], f"|{a+1}⟩ ~BChl{dom+1}", va="center", fontsize=7)
+    ax.set_xlim(0, 1.6); ax.set_xticks([])
+    ax.set_ylabel("Exciton energy (cm⁻¹)", fontsize=10)
+    ax.set_title("Exciton energy ladder", fontsize=10)
+    ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
+    ax.spines["bottom"].set_visible(False)
 
-    ax2d.plot(np.degrees(th_opt), r_opt, "*", color="#ff3b3b", markersize=18,
-              markeredgecolor="white", markeredgewidth=0.8,
-              label=f"max: r={r_opt:.1f} Å, θ={np.degrees(th_opt):.0f}°")
-    ax2d.legend(frameon=False, fontsize=10, loc="upper right",
-                labelcolor="white")
-    ax2d.set_xlabel("Dipole angle θ (°)", fontsize=12)
-    ax2d.set_ylabel("Intra-dimer distance r (Å)", fontsize=12)
+    # (c) Trapping time per starting pigment
+    ax = axes[2]
+    taus, etes = [], []
+    for s in range(N_SITES):
+        e, tau = compute_ete(H, initial_sites=(s,))
+        taus.append(tau / 1000); etes.append(e)
+    edge = ["black" if (i == TRAP_SITE or i in ENTRY_SITES) else "none"
+            for i in range(N_SITES)]
+    bars = ax.bar(range(1, N_SITES+1), taus,
+                  color=[_SITE_COLORS[i] for i in range(N_SITES)],
+                  edgecolor=edge, linewidth=1.4)
+    for b, e in zip(bars, etes):
+        ax.text(b.get_x()+b.get_width()/2, b.get_height()+0.05,
+                f"{e:.3f}", ha="center", fontsize=6.5)
+    ax.set_xlabel("starting BChl  (outlined = entry/trap)", fontsize=10)
+    ax.set_ylabel("trapping time (ps)", fontsize=10)
+    ax.set_title("Trapping time & ETE per entry site", fontsize=10)
+    ax.set_xticks(range(1, N_SITES+1))
+    ax.grid(True, axis="y", alpha=0.2, ls="--")
+    ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
 
-    fig.suptitle(
-        f"Fig. 2a: Reff(r, θ) — secular Redfield  "
-        f"({len(r_grid)}×{len(theta_grid)} grid)",
-        fontsize=13,
-    )
+    fig.suptitle("Fig. 2: Native 8-site FMO Hamiltonian and exciton structure "
+                 "(Klinger et al. 2020 / Schmidt am Busch et al. 2011)", fontsize=12)
     fig.tight_layout()
-    out = RESULTS_DIR / "fig2a_reff_heatmap.png"
+    out = RESULTS_DIR / "fig2_fmo_hamiltonian.png"
     fig.savefig(out, bbox_inches="tight")
     print(f"  Saved {out}")
 
-    # Save raw data
-    np.save(RESULTS_DIR / "reff_ohmic.npy", Reff_grid)
-    np.save(RESULTS_DIR / "r_grid.npy", r_grid)
-    np.save(RESULTS_DIR / "theta_grid.npy", theta_grid)
-    print(f"  Optimal geometry: r = {r_opt:.2f} Å, θ = {np.degrees(th_opt):.1f}°")
-    print(f"  Reff at optimum:  {Reff_grid[idx_max]:.4e} fs⁻¹")
+    np.save(RESULTS_DIR / "fmo_hamiltonian.npy", H)
 
-    return Reff_grid
-
-
-# ── Entry point ───────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     import argparse
     from gpu_utils import setup_gpu
     setup_gpu()
 
-    parser = argparse.ArgumentParser(description="Phase 1 validation against Ai et al.")
-    parser.add_argument("--fig1-only",   action="store_true", help="Only run Figure 1")
-    parser.add_argument("--fig2-only",   action="store_true", help="Only run Figure 2a")
-    parser.add_argument("--quick",       action="store_true",
-                        help="Fast low-resolution run (for testing)")
+    parser = argparse.ArgumentParser(description="Phase 1: 8-site FMO model")
+    parser.add_argument("--fig1-only", action="store_true")
+    parser.add_argument("--fig2-only", action="store_true")
+    parser.add_argument("--quick", action="store_true")
     args = parser.parse_args()
 
-    print("=== Unit check: coupling matrix ===")
+    print("=== Unit check: FMO Hamiltonian ===")
     unit_check()
 
-    run_fig1 = not args.fig2_only
-    run_fig2 = not args.fig1_only
+    t_end_1 = 15_000.0 if args.quick else 30_000.0
 
-    t_end_1  = 8_000.0   if args.quick else 15_000.0
-    t_end_2  = 50_000.0  if args.quick else 200_000.0
-    # Secular Redfield is ~ms/point and embarrassingly parallel → very fine grid.
-    r_pts    = 16         if args.quick else 120
-    th_pts   = 10         if args.quick else 80
-
-    if run_fig1:
-        print("\n=== Figure 1: trapping yield Q(t) ===")
-        reproduce_figure1(
-            t_end=t_end_1,
-            n_steps=300 if args.quick else 600,
-        )
-
-    if run_fig2:
-        print("\n=== Figure 2a: Reff heatmap ===")
-        reproduce_figure2a(
-            r_grid=np.linspace(8.0, 14.0, r_pts),
-            theta_grid=np.linspace(0.0, np.pi / 2, th_pts),
-            t_end=t_end_2,
-            n_steps=300 if args.quick else 500,
-        )
+    if not args.fig2_only:
+        print("\n=== Figure 1: energy-funnel dynamics ===")
+        figure1_funnel(t_end=t_end_1, n_steps=300 if args.quick else 600)
+    if not args.fig1_only:
+        print("\n=== Figure 2: FMO Hamiltonian & exciton structure ===")
+        figure2_hamiltonian()
 
     print("\nDone.")
