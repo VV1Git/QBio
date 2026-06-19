@@ -55,14 +55,22 @@ def main() -> None:
     parser.add_argument("--quick", action="store_true", help="Low-res fast run")
     parser.add_argument("--gpu",   action="store_true",
                         help="GPU via JAX — each script enables it automatically if available")
+    parser.add_argument("--refine-level", type=int, choices=[1, 2, 3, 4], default=0,
+                        help="High-fidelity refinement (OpenMM relax + APBS polarization) "
+                             "of the position scan: 1=key points (<1 min) … 4=fine heatmaps "
+                             "(~45 min). Points/grid only, not the full dense scan.")
+    parser.add_argument("--refine-jobs", type=int, default=8,
+                        help="Parallel APBS workers for grid refinement (default 8)")
     args = parser.parse_args()
 
     base = ["--quick"] if args.quick else []
+    refine = (["--refine-level", str(args.refine_level),
+               "--refine-jobs", str(args.refine_jobs)] if args.refine_level else [])
 
     phases = [
         ("validate.py",           base),
         ("analysis.py",           base),
-        ("phase4_scan.py",        base),
+        ("phase4_scan.py",        base + refine),
         ("phase5_sensitivity.py", base),
         ("phase6_summary.py",     []),     # loads cached data; no --quick needed
     ]

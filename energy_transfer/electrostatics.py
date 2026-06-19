@@ -32,15 +32,21 @@ from pathlib import Path
 import numpy as np
 
 _C_CM = 116140.0          # e²/(4πε₀) in cm⁻¹·Å
-DIELECTRIC = 2.0          # effective relative permittivity (protein interior)
+# Effective optical dielectric for the protein/pigment region.  ε=2 is the value
+# Adolphs & Renger (Biophys. J. 91, 2778, 2006) and Madjet et al. (J. Phys.
+# Chem. B 110, 17268, 2006) use for the FMO complex (empty-cavity model).
+DIELECTRIC = 2.0
 
 _HERE = Path(__file__).parent
 _d = np.load(_HERE / "fmo_atoms.npz")
 PROT_XYZ = _d["prot_xyz"]      # (Np, 3)
 PROT_Q   = _d["prot_q"]        # (Np,)
+PROT_RESID = _d["prot_resid"]  # (Np,) residue sequence number
+PROT_NAME  = _d["prot_name"]   # (Np,) atom name
 PIG_XYZ  = _d["pig_xyz"]       # (8, Na, 3) native pigment atom coords
 PIG_QG   = _d["pig_qg"]        # (Na,) ground-state charges
 PIG_DQ   = _d["pig_dq"]        # (Na,) Δq = excited − ground
+PIG_NAMES = _d["atom_names"]   # (Na,) pigment atom names
 N_PIG    = PIG_XYZ.shape[0]
 N_AT     = PIG_XYZ.shape[1]
 
@@ -142,10 +148,33 @@ def scan_pigment_grid(p: int, disps: np.ndarray) -> np.ndarray:
     return site_energies_batch(full)
 
 
+def validate_against_madjet2006() -> dict:
+    """
+    Cross-check the CDC charge data + method against Madjet, Abdurahman & Renger,
+    J. Phys. Chem. B 110, 17268 (2006), for FMO BChl a:
+
+      * difference dipole |Δd| = |Σ Δq_k r_k|  (paper: ~1.3 D TDDFT, 2.8 D HF-CIS)
+      * BChl1–BChl2 relative site-energy shift ΔE = E1 − E2 from the mutual
+        charge-density coupling, vacuum (paper Table 2: −81 HF-CIS / −4 TDDFT cm⁻¹)
+    """
+    dd = (PIG_DQ[:, None] * PIG_XYZ[0]).sum(0)        # e·Å (origin-free, ΣΔq=0)
+    delta_d_debye = 4.803 * np.linalg.norm(dd)
+
+    def _Em(m, other):                                 # vacuum V10,10 − V00,00
+        d = PIG_XYZ[m][:, None, :] - PIG_XYZ[other][None, :, :]
+        inv = 1.0 / np.sqrt((d * d).sum(-1))
+        return _C_CM * (PIG_DQ @ (inv @ PIG_QG))
+    dE12 = _Em(0, 1) - _Em(1, 0)
+    return {"delta_d_D": float(delta_d_debye), "dE_BChl1_BChl2_cm": float(dE12)}
+
+
 if __name__ == "__main__":
     import time
     print(f"protein atoms {len(PROT_Q)}, pigment atoms/BChl {N_AT}, ε={DIELECTRIC}, "
           f"GPU={gpu_active()}")
+    v = validate_against_madjet2006()
+    print(f"Madjet2006 cross-check:  |Δd|={v['delta_d_D']:.2f} D (paper ~1.3 D TDDFT);  "
+          f"ΔE(BChl1-2)={v['dE_BChl1_BChl2_cm']:.0f} cm⁻¹ (paper −81 HF-CIS)")
     print(f"V_native (cm⁻¹): {np.round(_V_NATIVE,1)}")
     for p, mag in [(2, 3.0), (0, 3.0), (7, 6.0)]:
         d = np.zeros((8, 3)); d[p, 0] = mag

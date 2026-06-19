@@ -70,7 +70,8 @@ def run_scan(n_grid: int, span: float, n_jobs: int = -1
     return us, vs, ete, rate
 
 
-def plot_position_scan(us, vs, ete, rate, opt: dict | None) -> None:
+def plot_position_scan(us, vs, ete, rate, opt: dict | None,
+                       out_name: str = "fig5_position_scan.png", tag: str = "") -> None:
     """
     3x3 figure: 8 per-pigment trapping-rate heatmaps + 1 global-optimisation
     panel.  Rate = 1/trapping-time (ps^-1); higher = faster, more efficient
@@ -147,11 +148,11 @@ def plot_position_scan(us, vs, ete, rate, opt: dict | None) -> None:
         ax.set_title("Global optimum", fontsize=9)
 
     fig.suptitle(
-        "Fig. 5: Position-vs-efficiency scan — 8-site FMO   "
+        "Fig. 5: Position-vs-efficiency scan — 8-site FMO" + tag + "   "
         f"(★ native: ETE={ete_native:.4f}, 1/τ={rate_native:.3f} ps⁻¹;  "
         "✕ per-pigment fastest spot)",
         fontsize=12, y=0.995)
-    out = RESULTS_DIR / "fig5_position_scan.png"
+    out = RESULTS_DIR / out_name
     fig.savefig(out, bbox_inches="tight")
     print(f"  Saved {out}")
 
@@ -164,6 +165,14 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--quick", action="store_true")
     parser.add_argument("--no-optimize", action="store_true")
+    parser.add_argument("--refine", action="store_true",
+                        help="High-fidelity refinement at level 1 (key points only).")
+    parser.add_argument("--refine-level", type=int, choices=[1, 2, 3, 4], default=0,
+                        help="Refinement precision: 1=key points (<1 min); 2=coarse "
+                             "heatmaps (~5 min); 3=medium (~12 min); 4=fine + finer PB "
+                             "grid (~45 min). Needs openmm + apbs.")
+    parser.add_argument("--refine-jobs", type=int, default=8,
+                        help="Parallel APBS workers for grid refinement (default 8).")
     parser.add_argument("--n-jobs", type=int, default=-1)
     args = parser.parse_args()
 
@@ -194,8 +203,49 @@ if __name__ == "__main__":
                     disp_inplane=opt["disp_inplane"], shift_mag=opt["shift_mag"],
                     ete_native=opt["ete_native"], ete_opt=opt["ete_opt"],
                     tau_native=opt["tau_native"], tau_opt=opt["tau_opt"])
+
+    # ── High-fidelity refinement (OpenMM relax + APBS PB), points-only / leveled ──
+    level = args.refine_level or (1 if args.refine else 0)
+    refined = None
+    if level and opt is not None:
+        import time as _time
+        from refine import (LEVELS, relaxed_protein_xyz, _native_refs, refine_ete,
+                            refine_scan_pigment)
+        from geometry_scan import disp_from_inplane, PLANE_AXES
+        grid_n, dime = LEVELS[level]
+        print(f"\n  Refinement level {level} (relax protein + APBS PB, dime={dime}, "
+              f"{args.refine_jobs} workers) …")
+        t0 = _time.time()
+        prot = relaxed_protein_xyz()            # protein relaxed around native pigments
+        ps_nat, pp_nat = _native_refs(prot, True, dime)
+
+        # always: refined global optimum
+        disp_opt = disp_from_inplane(opt["disp_inplane"])
+        ete_r, tau_r = refine_ete(disp_opt, dime=dime)
+        print(f"    Optimum fast    : ETE={opt['ete_opt']:.4f}  τ={opt['tau_opt']/1000:.2f} ps")
+        print(f"    Optimum refined : ETE={ete_r:.4f}  τ={tau_r/1000:.2f} ps")
+        save.update(ete_opt_refined=ete_r, tau_opt_refined=tau_r)
+
+        if grid_n:   # levels 2-4: refined per-pigment heatmaps
+            ur = np.linspace(-span, span, grid_n)
+            ete_ref = np.empty((N_SITES, grid_n, grid_n))
+            rate_ref = np.empty((N_SITES, grid_n, grid_n))
+            for p in tqdm(range(N_SITES), desc="refined scan", unit="BChl"):
+                e, t = refine_scan_pigment(p, ur, ur, prot, ps_nat, pp_nat, PLANE_AXES,
+                                           dime=dime, n_jobs=args.refine_jobs)
+                ete_ref[p] = e
+                rate_ref[p] = 1.0 / (t / 1000.0)
+            save.update(ur=ur, ete_ref=ete_ref, rate_ref=rate_ref)
+            refined = (ur, ete_ref, rate_ref)
+        print(f"    refinement done in {(_time.time()-t0)/60:.1f} min")
+
     np.savez(RESULTS_DIR / "p4_position_scan.npz", **save)
 
     print("\nGenerating figure …")
     plot_position_scan(us, vs, ete, rate, opt)
+    if refined is not None:
+        ur, ete_ref, rate_ref = refined
+        plot_position_scan(ur, ur, ete_ref, rate_ref, opt,
+                           out_name="fig5_position_scan_refined.png",
+                           tag=f" — refined L{level} (relax+APBS PB)")
     print("\nDone.")

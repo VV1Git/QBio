@@ -13,15 +13,18 @@ bacteriochlorophylls of one FMO monomer (see fmo_data.py for sources).
 The Hamiltonian is anchored to the published values at the native geometry and
 both parts respond to a rigid pigment displacement d:
 
-    couplings   J(d) = J_published + [PDA(d) − PDA(native)]     (point dipole)
-    site energy ε(d) = ε_published + CDC_shift(d)               (electrostatics.py)
+    couplings   J(d) = J_published + [TrEsp(d) − TrEsp(native)]  (tresp.py)
+    site energy ε(d) = ε_published + CDC_shift(d)                (electrostatics.py)
 
 so d=0 reproduces the published TrEsp Hamiltonian exactly, the couplings follow
-the point-dipole geometry change, and the site energies follow the
-charge-density-coupling (CDC) electrostatic shift of the moved transition
-charges against the protein + the other pigments.  This makes the position scan
-respond through BOTH couplings and site energies — see electrostatics.py for the
-CDC model and its (honestly stated) approximations.
+the literal TrEsp transition-charge change (Madjet, Abdurahman & Renger, J. Phys.
+Chem. B 110, 17268 (2006), using their Supporting-Information BChl a transition
+charges), and the site energies follow the charge-density-coupling (CDC)
+electrostatic shift of the moved transition charges against the protein + the
+other pigments.  The position scan therefore responds through BOTH couplings and
+site energies, with no point-dipole approximation.  (For FMO the TrEsp and PDA
+couplings agree to ~5 cm⁻¹ anyway — Madjet 2006 Fig. 7 — so this is fidelity
+insurance rather than a large change.)
 """
 
 from __future__ import annotations
@@ -96,11 +99,11 @@ def build_electronic_H(displacements: np.ndarray | None = None,
     if displacements is None and site_shift is None:
         return PUBLISHED_H_CM.copy()                       # exact native
 
+    from tresp import coupling_tresp, TRESP_NATIVE
     disp = np.zeros((8, 3)) if displacements is None else displacements
-    positions = MG_COORDS_ANG + disp
-    J = coupling_from_geometry(positions, QY_DIPOLE_UNIT)
+    J = coupling_tresp(disp)                               # literal TrEsp couplings
     if anchor:
-        J = PUBLISHED_COUPLINGS_CM + (J - _PDA_NATIVE)     # native-exact couplings
+        J = PUBLISHED_COUPLINGS_CM + (J - TRESP_NATIVE)    # native-exact couplings
 
     eps = SITE_ENERGIES_CM.astype(float).copy()
     if site_shift is not None:

@@ -1,0 +1,6 @@
+source leaprc.gaff2
+BCL = loadmol2 bcl_full.mol2
+loadamberparams bcl.frcmod
+saveoff BCL bcl.lib
+saveamberparm BCL bcl.prmtop bcl.inpcrd
+quit

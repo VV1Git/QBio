@@ -39,7 +39,7 @@ def main():
     names, qg, qe = _load_bchl_charges()
     name_set = set(names)
 
-    prot_xyz, prot_q = [], []
+    prot_xyz, prot_q, prot_resid, prot_name = [], [], [], []
     pig_atoms = {r: {} for r in BCHL_RESIDS}   # resid -> {atomname: xyz}
 
     for L in open(DATA / "fmo.pdb"):
@@ -58,8 +58,10 @@ def main():
         else:
             q = prot_chg.get(rn, {}).get(an, 0.0)
             prot_xyz.append(xyz); prot_q.append(q)
+            prot_resid.append(int(L[22:26])); prot_name.append(an)
 
     prot_xyz = np.array(prot_xyz); prot_q = np.array(prot_q)
+    prot_resid = np.array(prot_resid); prot_name = np.array(prot_name)
 
     # pigment atoms in BChla.dat order, for all 8 pigments
     pig_xyz = np.zeros((8, len(names), 3))
@@ -70,6 +72,7 @@ def main():
     dq = qe - qg
     np.savez(HERE / "fmo_atoms.npz",
              prot_xyz=prot_xyz, prot_q=prot_q,
+             prot_resid=prot_resid, prot_name=prot_name,
              pig_xyz=pig_xyz, pig_qg=qg, pig_dq=dq,
              atom_names=np.array(names))
 
