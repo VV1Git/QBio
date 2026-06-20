@@ -167,12 +167,15 @@ if __name__ == "__main__":
     parser.add_argument("--no-optimize", action="store_true")
     parser.add_argument("--refine", action="store_true",
                         help="High-fidelity refinement at level 1 (key points only).")
-    parser.add_argument("--refine-level", type=int, choices=[1, 2, 3, 4], default=0,
+    parser.add_argument("--refine-level", type=int, choices=[1, 2, 3, 4, 5], default=0,
                         help="Refinement precision: 1=key points (<1 min); 2=coarse "
                              "heatmaps (~5 min); 3=medium (~12 min); 4=fine + finer PB "
-                             "grid (~45 min). Needs openmm + apbs.")
+                             "grid (~45 min); 5=ULTRA: re-optimise under PB objective + "
+                             "high-res heatmaps (~5-6 h, use --refine-jobs 16). Needs openmm + apbs.")
     parser.add_argument("--refine-jobs", type=int, default=8,
-                        help="Parallel APBS workers for grid refinement (default 8).")
+                        help="Parallel APBS workers for refinement (use 16 for level 5).")
+    parser.add_argument("--refine-hours", type=float, default=5.0,
+                        help="Wall-clock budget (hours) for the level-5 re-optimisation.")
     parser.add_argument("--n-jobs", type=int, default=-1)
     args = parser.parse_args()
 
@@ -211,22 +214,39 @@ if __name__ == "__main__":
         import time as _time
         from refine import (LEVELS, relaxed_protein_xyz, _native_refs, refine_ete,
                             refine_scan_pigment)
-        from geometry_scan import disp_from_inplane, PLANE_AXES
+        from geometry_scan import disp_from_inplane
         grid_n, dime = LEVELS[level]
         print(f"\n  Refinement level {level} (relax protein + APBS PB, dime={dime}, "
               f"{args.refine_jobs} workers) …")
         t0 = _time.time()
         prot = relaxed_protein_xyz()            # protein relaxed around native pigments
-        ps_nat, pp_nat = _native_refs(prot, True, dime)
+        ps_nat, pp_nat = _native_refs(polarize=True, dime=dime, relax=True)
 
-        # always: refined global optimum
+        # always: refine the fast model's global optimum (full relax + PB)
         disp_opt = disp_from_inplane(opt["disp_inplane"])
         ete_r, tau_r = refine_ete(disp_opt, dime=dime)
-        print(f"    Optimum fast    : ETE={opt['ete_opt']:.4f}  τ={opt['tau_opt']/1000:.2f} ps")
-        print(f"    Optimum refined : ETE={ete_r:.4f}  τ={tau_r/1000:.2f} ps")
+        print(f"    Fast optimum             : ETE={opt['ete_opt']:.4f}  τ={opt['tau_opt']/1000:.2f} ps")
+        print(f"    Fast optimum, refined    : ETE={ete_r:.4f}  τ={tau_r/1000:.2f} ps")
         save.update(ete_opt_refined=ete_r, tau_opt_refined=tau_r)
 
-        if grid_n:   # levels 2-4: refined per-pigment heatmaps
+        # level 5 ("ultra"): RE-OPTIMISE under the PB-polarized objective (the long part)
+        if level >= 5:
+            from refine import optimize_refined
+            # reserve ~15% of the budget for heatmaps + the final full-relax refine
+            opt_budget = args.refine_hours * 3600.0 * 0.85
+            print(f"    Re-optimising the arrangement under the PB-polarized objective "
+                  f"(dime={dime}, {args.refine_jobs} workers, budget {opt_budget/3600:.1f} h) "
+                  "— this is the multi-hour step …")
+            inplane_r, disp_r = optimize_refined(bound=span, dime=dime,
+                                                 workers=args.refine_jobs,
+                                                 time_budget_s=opt_budget)
+            ete_ro, tau_ro = refine_ete(disp_r, relax=True, polarize=True, dime=dime)
+            print(f"    RE-OPTIMISED optimum     : ETE={ete_ro:.4f}  τ={tau_ro/1000:.2f} ps "
+                  f"(searched under high-fidelity physics)")
+            save.update(disp_inplane_refined=inplane_r, pos_ropt=MG_COORDS_ANG + disp_r,
+                        ete_ropt=ete_ro, tau_ropt=tau_ro)
+
+        if grid_n:   # levels 2-5: refined per-pigment heatmaps
             ur = np.linspace(-span, span, grid_n)
             ete_ref = np.empty((N_SITES, grid_n, grid_n))
             rate_ref = np.empty((N_SITES, grid_n, grid_n))

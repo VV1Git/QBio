@@ -55,17 +55,21 @@ def main() -> None:
     parser.add_argument("--quick", action="store_true", help="Low-res fast run")
     parser.add_argument("--gpu",   action="store_true",
                         help="GPU via JAX — each script enables it automatically if available")
-    parser.add_argument("--refine-level", type=int, choices=[1, 2, 3, 4], default=0,
+    parser.add_argument("--refine-level", type=int, choices=[1, 2, 3, 4, 5], default=0,
                         help="High-fidelity refinement (OpenMM relax + APBS polarization) "
                              "of the position scan: 1=key points (<1 min) … 4=fine heatmaps "
-                             "(~45 min). Points/grid only, not the full dense scan.")
+                             "(~45 min); 5=ULTRA re-optimise under PB objective (~5-6 h). "
+                             "Points/grid only, not the full dense scan.")
     parser.add_argument("--refine-jobs", type=int, default=8,
-                        help="Parallel APBS workers for grid refinement (default 8)")
+                        help="Parallel APBS workers for refinement (use 16 for level 5)")
+    parser.add_argument("--refine-hours", type=float, default=5.0,
+                        help="Wall-clock budget (hours) for the level-5 re-optimisation")
     args = parser.parse_args()
 
     base = ["--quick"] if args.quick else []
     refine = (["--refine-level", str(args.refine_level),
-               "--refine-jobs", str(args.refine_jobs)] if args.refine_level else [])
+               "--refine-jobs", str(args.refine_jobs),
+               "--refine-hours", str(args.refine_hours)] if args.refine_level else [])
 
     phases = [
         ("validate.py",           base),

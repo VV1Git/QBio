@@ -106,10 +106,9 @@ def compute_ete(H: np.ndarray,
         int_P = -m1                                        # integral P dt   (>= 0)
         m2 = np.linalg.solve(K_tot, m1)                    # K^{-2} P0
         int_tP = m2                                        # integral t P dt
-        yield_ = float(w_trap @ int_P)
+        yield_ = float(w_trap @ int_P)                     # trapping yield (ETE)
         etes.append(yield_)
-        denom = w_trap @ int_P
-        tau_int = (w_trap @ int_tP) / denom if denom > 0 else np.inf
+        tau_int = (w_trap @ int_tP) / yield_ if yield_ > 0 else np.inf
         taus.append(tau_int / (2.0 * np.pi * C_FS))        # internal -> fs
     return float(np.mean(etes)), float(np.mean(taus))
 

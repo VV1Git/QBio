@@ -79,7 +79,11 @@ def gamma_Ohmic(omega: float | np.ndarray,
 
 
 if __name__ == "__main__":
-    omegas = np.linspace(0, 500, 300)
+    # λ = (1/π) ∫₀^∞ J(ω)/ω dω  — recovers the input reorganisation energy.
+    _trapz = getattr(np, "trapezoid", None) or np.trapz   # NumPy 2.0 renamed trapz
+    omegas = np.linspace(0, 2000, 4000)[1:]               # skip ω=0 (J/ω limit)
     J_vals = J_Ohmic(omegas)
+    lam_num = _trapz(J_vals / omegas, omegas) / np.pi
     print(f"Peak J at ω = γ = {GAMMA_CM} cm⁻¹:  J = {J_Ohmic(GAMMA_CM):.2f} cm⁻¹")
-    print(f"Reorganisation energy check (numerical):  λ ≈ {np.trapz(J_vals/omegas[1:], omegas[1:]):.1f} cm⁻¹")
+    print(f"Reorganisation energy check (numerical):  λ ≈ {lam_num:.1f} cm⁻¹ "
+          f"(input {LAMBDA_CM:.0f})")

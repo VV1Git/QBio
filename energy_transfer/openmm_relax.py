@@ -119,11 +119,6 @@ def relax_protein(max_iterations: int = 0, write_relaxed: Path | None = None) ->
         }
 
 
-def relaxed_protein_coords(max_iterations: int = 0) -> dict:
-    """Relax the protein and return {(resSeq, atom_name): relaxed xyz (Å)} for heavy atoms."""
-    return relax_protein(max_iterations=max_iterations)["coords"]
-
-
 # Per-element Lennard-Jones (sigma nm, epsilon kJ/mol), AMBER/GAFF-like — gives the
 # pigment its excluded volume so the protein relaxes *around* it.
 _ELEM_LJ = {"C": (0.339, 0.359), "N": (0.325, 0.711), "O": (0.296, 0.879),
@@ -149,7 +144,7 @@ def relax_protein_around(displacements, max_iterations: int = 0) -> dict:
     from pdbfixer import PDBFixer
     import openmm
     from openmm import unit
-    from openmm.app import ForceField, Modeller, NoCutoff, HBonds, Element, Topology
+    from openmm.app import ForceField, Modeller, NoCutoff, HBonds, Element
     import numpy as np
     from electrostatics import PIG_XYZ, PIG_QG, PIG_NAMES, N_PIG, N_AT
 

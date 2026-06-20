@@ -7,7 +7,7 @@ Inputs (vendored in data/):
     data/fmo.pdb                    geometry-optimised FMO trimer (Zenodo 4110066)
     data/BChla.dat                  BChl a ground/excited partial charges (Zenodo)
     data/charmm36_prot_charges.json CHARMM36 protein partial charges (parsed from
-                                    top_all36_prot.rtf; THN/GLT use THR/GLU fallback)
+                                    top_all36_prot.rtf; THN→THR, GLT→GLN fallback)
 
 Output: fmo_atoms.npz
     prot_xyz (Np,3), prot_q (Np,)          protein point charges (monomer A)

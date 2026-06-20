@@ -84,9 +84,16 @@ def _pigpig_shift(pig_pos: np.ndarray) -> np.ndarray:
     return out
 
 
-def _native_refs(prot, polarize, dime):
-    key = (id(prot), polarize, dime)
+def _native_refs(polarize: bool = True, dime: int = 97, relax: bool = True):
+    """
+    Native-geometry reference shifts (protein, pigment-pigment), cached on
+    (relax, polarize, dime).  The native protein is the one relaxed around the
+    native pigments when relax=True, else the crystal protein; either way these
+    are subtracted in refine_ete so that d=0 reproduces the published Hamiltonian.
+    """
+    key = (relax, polarize, dime)
     if key not in _ref_cache:
+        prot = relaxed_protein_xyz() if relax else PROT_XYZ
         prot_fn = pb_protein_shift if polarize else scalar_protein_shift
         _ref_cache[key] = (prot_fn(prot, PIG_XYZ, dime=dime), _pigpig_shift(PIG_XYZ))
     return _ref_cache[key]
@@ -107,12 +114,8 @@ def refine_ete(displacements, relax=True, polarize=True, dime=97):
     """
     disp = np.asarray(displacements, float)
     prot_geo = _relaxed_prot(disp) if relax else PROT_XYZ
-    prot_nat = _relaxed_prot(np.zeros((N_PIG, 3))) if relax else PROT_XYZ
     prot_fn = pb_protein_shift if polarize else scalar_protein_shift
-    ckey = (relax, polarize, dime)
-    if ckey not in _ref_cache:
-        _ref_cache[ckey] = (prot_fn(prot_nat, PIG_XYZ, dime=dime), _pigpig_shift(PIG_XYZ))
-    ps_nat, pp_nat = _ref_cache[ckey]
+    ps_nat, pp_nat = _native_refs(polarize, dime, relax)
     pig_geo = PIG_XYZ + disp[:, None, :]
     shift = (prot_fn(prot_geo, pig_geo, dime=dime) - ps_nat) + (_pigpig_shift(pig_geo) - pp_nat)
     return compute_ete(build_electronic_H(disp, site_shift=shift))
@@ -154,21 +157,31 @@ def _refined_objective(x, dime):
     return tau + pen
 
 
-def optimize_refined(bound=6.0, maxiter=150, popsize=16, dime=129,
-                     workers=REFINE_JOBS, seed=0):
+def optimize_refined(bound=6.0, maxiter=10000, popsize=16, dime=129,
+                     workers=REFINE_JOBS, seed=0, time_budget_s=None):
     """
     Global optimisation of the 8-pigment arrangement under the PB-polarized
     objective (parallel APBS workers).  Returns (inplane (8,2), disp (8,3)).
+
     Each objective eval is one PB solve; differential_evolution parallelises the
-    population across `workers` processes.
+    population across `workers` processes.  If time_budget_s is set, the search
+    runs until that wall-clock budget is reached (then returns the best so far),
+    so it uses exactly the time you allow regardless of worker count.
     """
+    import time as _t
     from scipy.optimize import differential_evolution
     from geometry_scan import disp_from_inplane
     bounds = [(-bound, bound)] * (2 * N_PIG)
+
+    # Version-robust wall-clock stop: callback returning True ends the search.
+    t0 = _t.time()
+    def cb(*a, **k):
+        return time_budget_s is not None and (_t.time() - t0) > time_budget_s
+
     res = differential_evolution(
         _refined_objective, bounds, args=(dime,), maxiter=maxiter, popsize=popsize,
-        workers=workers, updating="deferred", seed=seed, tol=1e-4,
-        mutation=(0.5, 1.0), recombination=0.7, polish=False)
+        workers=workers, updating="deferred", seed=seed, tol=1e-6,
+        mutation=(0.5, 1.0), recombination=0.7, polish=False, callback=cb)
     inplane = res.x.reshape(N_PIG, 2)
     return inplane, disp_from_inplane(inplane)
 

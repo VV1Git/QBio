@@ -114,12 +114,6 @@ def build_electronic_H(displacements: np.ndarray | None = None,
     return np.diag(eps) + J
 
 
-def build_reference_H(exact: bool = True) -> np.ndarray:
-    """Native-geometry Hamiltonian (published TrEsp values; default exact)."""
-    return PUBLISHED_H_CM.copy() if exact else (
-        np.diag(SITE_ENERGIES_CM.astype(float)) + _PDA_NATIVE)
-
-
 # ── Quick inspect ─────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":

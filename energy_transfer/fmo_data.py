@@ -122,7 +122,7 @@ def validate_hamiltonian() -> float:
 if __name__ == "__main__":
     rms = validate_hamiltonian()
     print(f"PDA vs published couplings: RMS = {rms:.2f} cm^-1")
-    print(f"Mean Mg-Mg nearest-neighbour distance: ", end="")
+    print("Mean Mg-Mg nearest-neighbour distance: ", end="")
     pos = MG_COORDS_ANG
     d = np.linalg.norm(pos[None] - pos[:, None], axis=-1)
     np.fill_diagonal(d, np.inf)
