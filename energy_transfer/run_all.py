@@ -17,10 +17,16 @@ Outputs (in results/) — 8-site FMO model
     fig5_position_scan.png      phase4_scan.py    — per-pigment scan + global optimum
     fig6_bath_sensitivity.png   phase5_sensitivity.py — ETE/τ vs bath params
     fig7_summary.png            phase6_summary.py — 6-panel summary
+    fig8_sensitivity_fingerprint.png  phase7_impact.py — tolerance radius + pocket
+    fig9_bchl8_trimer.png       phase7_impact.py — BChl 8 inter-monomer entry role
+    fig10_out_of_plane.png      phase7_impact.py — in-plane vs out-of-plane tolerance
+    fig11_optimum_anatomy.png   phase7_impact.py — site-energy/coupling shifts at opt
+    fig12_noise_robustness.png  phase7_impact.py — native vs optimum under jitter
 
     fmo_hamiltonian.npy            (Phase 1)
     p4_position_scan.npz           (Phase 4: per-pigment grids + optimisation)
     p5_sensitivity_data.npz        (Phase 5)
+    p7_impact_data.npz             (Phase 7: impact-analysis arrays)
 """
 
 from __future__ import annotations
@@ -77,6 +83,7 @@ def main() -> None:
         ("phase4_scan.py",        base + refine),
         ("phase5_sensitivity.py", base),
         ("phase6_summary.py",     []),     # loads cached data; no --quick needed
+        ("phase7_impact.py",      base),   # impact analyses (needs phase4 output)
     ]
 
     t_start = time.time()
