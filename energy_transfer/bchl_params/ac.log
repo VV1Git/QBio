@@ -1,9 +1,0 @@
-Info: The atom type is set to gaff2; the options available to the -at flag are
-      gaff, gaff2, amber, bcc, abcg2, and sybyl.
-
-/bin/bash: /home/nishant/miniconda3/lib/libtinfo.so.6: no version information available (required by /bin/bash)
-/bin/bash: /home/nishant/miniconda3/lib/libtinfo.so.6: no version information available (required by /bin/bash)
-/bin/bash: /home/nishant/miniconda3/lib/libtinfo.so.6: no version information available (required by /bin/bash)
-
-Warning: The net charge of the molecule (-2   ) does not equal the         total formal charge (0.00 ) according to the Gasteiger atom types.
-

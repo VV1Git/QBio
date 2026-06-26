@@ -1,1 +1,0 @@
-"""QBio source package."""

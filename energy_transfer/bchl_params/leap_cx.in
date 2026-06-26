@@ -1,8 +1,0 @@
-source leaprc.protein.ff14SB
-source leaprc.gaff2
-source leaprc.water.tip3p
-loadoff bcl.lib
-loadamberparams bcl.frcmod
-cx = loadpdb complex.pdb
-saveamberparm cx complex.prmtop complex.inpcrd
-quit
