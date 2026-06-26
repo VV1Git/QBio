@@ -1,6 +1,12 @@
-qutip>=5.0
+# Core dependencies — FMO energy-transfer project
+qutip>=5.0          # open-quantum-system solvers (Bloch–Redfield, HEOM)
 numpy>=1.24
 scipy>=1.10
 matplotlib>=3.7
-joblib>=1.3
-tqdm>=4.65
+joblib>=1.3         # parallel APBS workers in the refinement (refine.py)
+tqdm>=4.65          # progress bars (run_all.py and friends)
+
+# Optional GPU acceleration (JAX / CUDA 12.x).  Everything runs on CPU without
+# these; the code auto-detects a GPU and falls back silently if they are absent.
+# Install only on a CUDA machine:
+#   pip install "jax[cuda12]" qutip-jax diffrax

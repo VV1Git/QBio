@@ -51,8 +51,11 @@ def _redfield_rate_matrix(H: np.ndarray,
 
         Gamma_{a->b} = [sum_i (U[i,a] U[i,b])^2] * gamma(E_a - E_b)
         K[b,a] = Gamma_{a->b}   (gain),   K[a,a] = -sum_b Gamma_{a->b}
+
+    Works for any number of sites (N = H.shape[0]); the uniform energy reference
+    only conditions the eigensolve and does not affect the dynamics.
     """
-    H = H - np.mean(SITE_ENERGIES_CM) * np.eye(N_SITES)   # reduce stiffness
+    H = H - np.mean(np.diag(H)) * np.eye(H.shape[0])      # reduce stiffness
     eigvals, U = np.linalg.eigh(H)
 
     F = (U ** 2).T @ (U ** 2)                              # overlap F[a,b]
@@ -97,7 +100,7 @@ def compute_ete(H: np.ndarray,
     k_loss = _fs_to_cm(k_loss_fs)
 
     w_trap = k_trap * U[trap_site, :] ** 2                 # trapping weight per exciton
-    K_tot = K - k_loss * np.eye(N_SITES) - np.diag(w_trap)
+    K_tot = K - k_loss * np.eye(H.shape[0]) - np.diag(w_trap)
 
     etes, taus = [], []
     for s in initial_sites:

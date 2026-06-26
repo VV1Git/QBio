@@ -7,12 +7,18 @@ vibronic coherence is most relevant.  The remaining weaker modes plus the
 phonon continuum are folded into a residual Ohmic bath that drives pure
 electronic dephasing.
 
-Mode parameters — the two most strongly coupled intramolecular vibrations of
-BChl a, from the dFLN measurements of Rätsep & Freiberg, J. Lumin. 127, 251
-(2007), Table 1:
-    Mode 1 : w1 = 770 cm^-1, Huang-Rhys S1 = 0.018  (coupled to BChl 3)
-    Mode 2 : w2 = 243 cm^-1, Huang-Rhys S2 = 0.012  (coupled to BChl 4)
-    g_k = w_k * sqrt(S_k)  ->  g1 ~ 103 cm^-1,  g2 ~ 27 cm^-1
+Mode parameters — the ~180 cm^-1 intramolecular BChl a vibration that is
+NEAR-RESONANT with the FMO exciton energy gaps and is the mode implicated in
+vibronically-assisted transfer / long-lived coherence (Adolphs & Renger,
+Biophys. J. 91, 2778 (2006), effective high-energy mode S = 0.22, w = 180 cm^-1;
+see also Thyrhaug et al., Nat. Chem. 2018 / "tuning quantum-mechanical mixing",
+PNAS 115, 2018).  It is coupled to BOTH partners of the strongly-coupled
+BChl 3-4 dimer, which forms the lowest excitons where the resonance lives:
+    Mode 1 : w1 = 180 cm^-1, Huang-Rhys S1 = 0.22  (coupled to BChl 3)
+    Mode 2 : w2 = 180 cm^-1, Huang-Rhys S2 = 0.22  (coupled to BChl 4)
+    g_k = w_k * sqrt(S_k)  ->  g1 = g2 ~ 84 cm^-1
+(The earlier 770/243 cm^-1 modes from Rätsep & Freiberg 2007 are off-resonant
+and far more weakly coupled, so they do not drive the coherence physics.)
 
 Because the full vibronic Hilbert space is 8*(n_max+1)^2-dimensional, this model
 is used only for single-geometry showcase trajectories (Fig. 3 dynamics and
@@ -32,11 +38,11 @@ from spectral_density import LAMBDA_CM, GAMMA_CM, TEMPERATURE_K
 
 # ── Mode constants ─────────────────────────────────────────────────────────────
 
-OMEGA1_CM = 770.0   # mode 1 frequency (cm^-1), BChl 3 — Rätsep 2007
-OMEGA2_CM = 243.0   # mode 2 frequency (cm^-1), BChl 4 — Rätsep 2007
-S1 = 0.018          # Huang-Rhys factor, mode 1 (strongest intramolecular mode)
-S2 = 0.012          # Huang-Rhys factor, mode 2
-MODE1_SITE = 2      # BChl 3
+OMEGA1_CM = 180.0   # resonant mode (cm^-1), BChl 3 — Adolphs & Renger 2006
+OMEGA2_CM = 180.0   # resonant mode (cm^-1), BChl 4 — near-resonant w/ exciton gap
+S1 = 0.22           # Huang-Rhys factor, mode 1 (Adolphs-Renger effective mode)
+S2 = 0.22           # Huang-Rhys factor, mode 2
+MODE1_SITE = 2      # BChl 3  (lower partner of the coherent BChl 3-4 dimer)
 MODE2_SITE = 3      # BChl 4
 N_MAX = 2           # Fock truncation per mode (dim = 8*(N_MAX+1)^2 = 72)
 
@@ -99,7 +105,10 @@ def _collapse_operators(temperature, lambda_, gamma_bath, gamma_vib,
         np.sqrt(gamma_vib *  n2)        * qt.tensor(I_el, I_m, a2d),
     ]
 
-    lambda_res = max(0.0, lambda_ - S1 * OMEGA1_CM - S2 * OMEGA2_CM)
+    # The explicit 180 cm⁻¹ mode is the structured peak ADDED on top of the Drude
+    # continuum (J_structured = Drude + mode), so the residual pure-dephasing bath
+    # is the full low-frequency Drude reorganisation λ — not λ minus the modes.
+    lambda_res = lambda_
     gamma_phi  = 2.0 * lambda_res * temperature / (_HBAR_OVER_KB * gamma_bath)
     if gamma_phi > 0.0:
         sqrt_phi = np.sqrt(gamma_phi)

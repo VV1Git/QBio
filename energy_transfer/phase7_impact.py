@@ -361,14 +361,19 @@ def analysis_noise(p4: dict, sigmas=(0.1, 0.25, 0.5, 1.0, 1.5),
     opt = np.asarray(p4["disp_inplane"], float)
     res = {"sigmas": np.array(sigmas)}
     for name, base in [("native", nat), ("optimum", opt)]:
-        means, stds, p10 = [], [], []
+        means, stds, p10, p50, p90 = [], [], [], [], []
         for s in sigmas:
             jitter = base[None] + rng.normal(0, s, (n_samples, N_SITES, 2))
             ete = _ete_batch_inplane(jitter)
             means.append(ete.mean()); stds.append(ete.std())
+            # percentiles respect the hard ETE ≤ 1 bound (the distribution is
+            # left-skewed against the ceiling, so mean±σ would overshoot 1).
             p10.append(np.percentile(ete, 10))
+            p50.append(np.percentile(ete, 50))
+            p90.append(np.percentile(ete, 90))
         res[name] = {"mean": np.array(means), "std": np.array(stds),
-                     "p10": np.array(p10)}
+                     "p10": np.array(p10), "p50": np.array(p50),
+                     "p90": np.array(p90)}
     res["ete_native0"] = float(p4["ete_native"])
     res["ete_opt0"] = float(p4["ete_opt"])
     return res
@@ -380,14 +385,16 @@ def plot_noise(nz: dict) -> None:
     s = nz["sigmas"]
     for name, color, e0 in [("native", "#1a6e8c", nz["ete_native0"]),
                             ("optimum", "#d45f1e", nz["ete_opt0"])]:
-        m, sd = nz[name]["mean"], nz[name]["std"]
-        ax.plot(s, m, "-o", color=color, lw=2.2, label=f"{name} (jittered mean)")
-        ax.fill_between(s, m - sd, m + sd, color=color, alpha=0.15)
+        p10, p50, p90 = nz[name]["p10"], nz[name]["p50"], nz[name]["p90"]
+        ax.plot(s, p50, "-o", color=color, lw=2.2, label=f"{name} (median)")
+        ax.fill_between(s, p10, p90, color=color, alpha=0.15)
         ax.axhline(e0, color=color, ls=":", lw=1.2, alpha=0.8)
     ax.set_xlabel("positional jitter σ per coordinate (Å)", fontsize=10)
     ax.set_ylabel("ETE", fontsize=10)
+    ax.set_ylim(top=1.005)
     ax.set_title("Fig. 12: Robustness of the native vs optimised arrangement\n"
-                 "(dotted = unperturbed; band = ±1σ over 200 samples)", fontsize=11)
+                 "(dotted = unperturbed; band = 10th–90th percentile over 200 samples)",
+                 fontsize=11)
     ax.legend(frameon=False, fontsize=9, loc="lower left")
     ax.grid(True, alpha=0.18, ls="--")
     ax.spines["top"].set_visible(False); ax.spines["right"].set_visible(False)
@@ -464,13 +471,18 @@ def main() -> None:
     print("\n[6] Noise robustness …")
     nz = analysis_noise(p4, n_samples=n_samples)
     plot_noise(nz)
+    i50 = int(np.where(nz["sigmas"] == 0.5)[0][0])
     for name in ("native", "optimum"):
-        print(f"    {name:<8}: jittered ETE at σ=0.5Å = "
-              f"{nz[name]['mean'][np.where(nz['sigmas']==0.5)[0][0]]:.4f} "
-              f"± {nz[name]['std'][np.where(nz['sigmas']==0.5)[0][0]]:.4f}")
+        q = nz[name]
+        print(f"    {name:<8}: σ=0.5Å median ETE = {q['p50'][i50]:.4f} "
+              f"[p10 {q['p10'][i50]:.4f}, p90 {q['p90'][i50]:.4f}]")
     save.update(noise_sigmas=nz["sigmas"],
                 noise_native_mean=nz["native"]["mean"], noise_native_std=nz["native"]["std"],
-                noise_opt_mean=nz["optimum"]["mean"], noise_opt_std=nz["optimum"]["std"])
+                noise_native_p10=nz["native"]["p10"], noise_native_p50=nz["native"]["p50"],
+                noise_native_p90=nz["native"]["p90"],
+                noise_opt_mean=nz["optimum"]["mean"], noise_opt_std=nz["optimum"]["std"],
+                noise_opt_p10=nz["optimum"]["p10"], noise_opt_p50=nz["optimum"]["p50"],
+                noise_opt_p90=nz["optimum"]["p90"])
 
     np.savez(RESULTS_DIR / "p7_impact_data.npz", **save)
     print(f"\nSaved {RESULTS_DIR / 'p7_impact_data.npz'}")
